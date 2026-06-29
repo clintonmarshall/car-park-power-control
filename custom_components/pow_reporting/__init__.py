@@ -373,7 +373,7 @@ async def _async_record_session_event(
     await _async_save_billing(hass, data)
 
 
-def _billing_report(data: dict[str, Any]) -> dict[str, Any]:
+def _billing_report(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Return billing data with active durations and completed costs."""
     now = datetime.now().astimezone()
     settings = data["settings"]
@@ -381,13 +381,22 @@ def _billing_report(data: dict[str, Any]) -> dict[str, Any]:
     active = []
     for session in data["active"].values():
         start_time = datetime.fromisoformat(session["start_time"])
+        current_energy = _normalise_energy_kwh(hass.states.get(session.get("energy_entity_id", "")))
+        start_energy = session.get("start_energy_kwh")
+        energy_used = (
+            max(0, current_energy - start_energy)
+            if current_energy is not None and isinstance(start_energy, (int, float))
+            else None
+        )
+        session_rate = float(session.get("rate", rate) or rate)
         active.append(
             {
                 **session,
                 "active": True,
                 "duration_seconds": max(0, round((now - start_time).total_seconds())),
-                "energy_kwh": None,
-                "cost": None,
+                "current_energy_kwh": current_energy,
+                "energy_kwh": round(energy_used, 4) if energy_used is not None else None,
+                "cost": _session_cost(energy_used, session_rate),
             }
         )
     completed = []
@@ -436,7 +445,7 @@ async def _websocket_get_billing_report(
     msg: dict[str, Any],
 ) -> None:
     """Return persisted billing/session report data."""
-    connection.send_result(msg["id"], _billing_report(await _async_load_billing(hass)))
+    connection.send_result(msg["id"], _billing_report(hass, await _async_load_billing(hass)))
 
 
 @websocket_api.websocket_command(
@@ -461,7 +470,7 @@ async def _websocket_save_billing_settings(
         "currency": msg["currency"].strip() or "AUD",
     }
     await _async_save_billing(hass, data)
-    connection.send_result(msg["id"], _billing_report(data))
+    connection.send_result(msg["id"], _billing_report(hass, data))
 
 
 @websocket_api.websocket_command(

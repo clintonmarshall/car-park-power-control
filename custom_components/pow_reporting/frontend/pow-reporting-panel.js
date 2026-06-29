@@ -612,6 +612,30 @@ class PowReportingPanel extends HTMLElement {
     return score;
   }
 
+  _liveSessionDuration(session) {
+    if (!session?.start_time) return session?.duration_seconds;
+    const start = new Date(session.start_time).getTime();
+    if (!Number.isFinite(start)) return session.duration_seconds;
+    return Math.max(0, Math.round((Date.now() - start) / 1000));
+  }
+
+  _liveSessionCost(session, outlet) {
+    if (!session) return null;
+    const startEnergy = Number(session.start_energy_kwh);
+    const currentEnergy = this._energyKwhForRow(outlet.energy);
+    if (Number.isFinite(startEnergy) && Number.isFinite(currentEnergy)) {
+      const rate = Number(session.rate ?? this._billingReport.settings?.energy_rate ?? 0.32);
+      return Math.max(0, currentEnergy - startEnergy) * rate;
+    }
+    return Number.isFinite(Number(session.cost)) ? Number(session.cost) : null;
+  }
+
+  _formatLiveSessionCost(session, outlet) {
+    const cost = this._liveSessionCost(session, outlet);
+    if (!Number.isFinite(cost)) return "--";
+    return formatCurrency(cost, session?.currency || this._billingReport.settings?.currency || "AUD");
+  }
+
   async _loadRenamePreview({ apply = false } = {}) {
     if (!this._hass?.callWS) return;
     if (apply) {
@@ -855,8 +879,8 @@ class PowReportingPanel extends HTMLElement {
         <div class="meter-row">
           <span><b>${htmlEscape(power)}</b><small>Live load</small></span>
           <span><b>${htmlEscape(energy)}</b><small>Meter</small></span>
-          <span><b>${session ? htmlEscape(formatDuration(session.duration_seconds)) : "--"}</b><small>Charging for</small></span>
-          <span><b>${session ? htmlEscape(formatCurrency(session.cost, session.currency)) : "--"}</b><small>Session cost</small></span>
+          <span><b>${session ? htmlEscape(formatDuration(this._liveSessionDuration(session))) : "--"}</b><small>Charging for</small></span>
+          <span><b>${session ? htmlEscape(this._formatLiveSessionCost(session, outlet)) : "--"}</b><small>Session cost</small></span>
         </div>
       </article>
     `;
@@ -919,8 +943,8 @@ class PowReportingPanel extends HTMLElement {
         <div class="meter-row">
           <span><b>${htmlEscape(power)}</b><small>Live load</small></span>
           <span><b>${htmlEscape(energy)}</b><small>Energy</small></span>
-          <span><b>${activeSession ? htmlEscape(formatDuration(activeSession.duration_seconds)) : "--"}</b><small>Charging for</small></span>
-          <span><b>${activeSession ? htmlEscape(formatCurrency(activeSession.cost, activeSession.currency)) : "--"}</b><small>Session cost</small></span>
+          <span><b>${activeSession ? htmlEscape(formatDuration(this._liveSessionDuration(activeSession))) : "--"}</b><small>Charging for</small></span>
+          <span><b>${activeSession ? htmlEscape(this._formatLiveSessionCost(activeSession, outlet)) : "--"}</b><small>Session cost</small></span>
         </div>
         <label>Customer, bay, or booking reference
           <input data-reference-for="${htmlEscape(switchEntityId)}" value="${htmlEscape(activeReference)}" placeholder="Bay 14 - Smith">
