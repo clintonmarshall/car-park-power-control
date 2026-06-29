@@ -23,11 +23,16 @@ import homeassistant.helpers.config_validation as cv
 from .const import (
     CONF_DASHBOARD_NAME,
     CONF_ENTITY_FILTER,
+    CONF_ENABLE_CUSTOMER_PORTAL,
     CONF_LOGO_URL,
+    CONF_PORTAL_NAME,
+    CONF_PORTAL_URL_PATH,
     CONF_SIDEBAR_ICON,
     CONF_URL_PATH,
     DEFAULT_DASHBOARD_NAME,
     DEFAULT_ENTITY_FILTER,
+    DEFAULT_PORTAL_NAME,
+    DEFAULT_PORTAL_URL_PATH,
     DEFAULT_SIDEBAR_ICON,
     DEFAULT_URL_PATH,
     DOMAIN,
@@ -54,6 +59,9 @@ CONFIG_SCHEMA = vol.Schema(
                     CONF_ENTITY_FILTER,
                     default=DEFAULT_ENTITY_FILTER,
                 ): cv.string,
+                vol.Optional(CONF_ENABLE_CUSTOMER_PORTAL, default=True): cv.boolean,
+                vol.Optional(CONF_PORTAL_NAME, default=DEFAULT_PORTAL_NAME): cv.string,
+                vol.Optional(CONF_PORTAL_URL_PATH, default=DEFAULT_PORTAL_URL_PATH): cv.string,
             }
         )
     },
@@ -89,6 +97,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             options.get(CONF_URL_PATH, DEFAULT_URL_PATH),
         )
     )
+    entry.async_on_unload(
+        lambda: frontend.async_remove_panel(
+            hass,
+            options.get(CONF_PORTAL_URL_PATH, DEFAULT_PORTAL_URL_PATH),
+        )
+    )
     return True
 
 
@@ -100,6 +114,8 @@ async def _async_register_dashboard(
     url_path = options.get(CONF_URL_PATH, DEFAULT_URL_PATH)
     sidebar_title = options.get(CONF_DASHBOARD_NAME, DEFAULT_DASHBOARD_NAME)
     sidebar_icon = options.get(CONF_SIDEBAR_ICON, DEFAULT_SIDEBAR_ICON)
+    entity_filter = options.get(CONF_ENTITY_FILTER, DEFAULT_ENTITY_FILTER)
+    logo_url = options.get(CONF_LOGO_URL, "")
 
     panel_path = Path(__file__).parent / "frontend" / "pow-reporting-panel.js"
     await hass.http.async_register_static_paths(
@@ -122,10 +138,30 @@ async def _async_register_dashboard(
         module_url=PANEL_JS_URL,
         config={
             "name": sidebar_title,
-            "logo_url": options.get(CONF_LOGO_URL, ""),
-            "entity_filter": options.get(CONF_ENTITY_FILTER, DEFAULT_ENTITY_FILTER),
+            "logo_url": logo_url,
+            "entity_filter": entity_filter,
+            "mode": "admin",
         },
     )
+
+    if options.get(CONF_ENABLE_CUSTOMER_PORTAL, True):
+        portal_url_path = options.get(CONF_PORTAL_URL_PATH, DEFAULT_PORTAL_URL_PATH)
+        portal_title = options.get(CONF_PORTAL_NAME, DEFAULT_PORTAL_NAME)
+        await panel_custom.async_register_panel(
+            hass,
+            webcomponent_name="pow-reporting-panel",
+            frontend_url_path=portal_url_path,
+            sidebar_title=portal_title,
+            sidebar_icon="mdi:ev-station",
+            require_admin=False,
+            module_url=PANEL_JS_URL,
+            config={
+                "name": portal_title,
+                "logo_url": logo_url,
+                "entity_filter": entity_filter,
+                "mode": "portal",
+            },
+        )
 
 
 def _async_register_websocket_commands(hass: HomeAssistant) -> None:

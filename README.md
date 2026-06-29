@@ -93,6 +93,24 @@ The operational portal is served by the HACS custom integration as a Home
 Assistant sidebar panel. No separate Node/Express service is required for a
 fresh Home Assistant installation.
 
+By default it registers two Home Assistant routes on port `8123`:
+
+- `/pow-reporting` for the admin dashboard, outlet controls, settings, entity
+  naming tools, and reports
+- `/pow-portal` for the customer-style charging portal view
+
+For example:
+
+```text
+http://homeassistant.local:8123/pow-reporting
+http://homeassistant.local:8123/pow-portal
+```
+
+Both routes are served by Home Assistant and use Home Assistant authentication.
+That is intentional for the HACS package. A public customer portal should be a
+separate tokenized/share-link route so outlet state and control permissions are
+not exposed accidentally.
+
 The panel stores charge sessions and billing settings in Home Assistant storage
 under `.storage/pow_reporting.billing`. Outlet audit events are stored under
 `.storage/pow_reporting.outlet_log`.

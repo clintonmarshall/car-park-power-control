@@ -75,6 +75,8 @@ class PowReportingPanel extends HTMLElement {
     this._billingPeriod = "day";
     this._billingReport = { settings: { energy_rate: 0.32, currency: "AUD" }, active: [], completed: [], sessions: [] };
     this._billingMessage = "";
+    this._portalQuery = "";
+    this._panelMode = "admin";
     this._chartRows = [];
     this._loadingStats = false;
     this._renamePreview = [];
@@ -114,6 +116,10 @@ class PowReportingPanel extends HTMLElement {
       logoUrl: config.logo_url || this._settings.logoUrl,
       filter: config.entity_filter || this._settings.filter,
     };
+    this._panelMode = config.mode || "admin";
+    if (this._panelMode === "portal") {
+      this._activeTab = "portal";
+    }
   }
 
   connectedCallback() {
@@ -599,10 +605,11 @@ class PowReportingPanel extends HTMLElement {
     const totals = this._totals();
     const energyRows = this._entities.filter((row) => row.isEnergy);
     const powerRows = this._entities.filter((row) => row.isPower);
+    const isPortal = this._panelMode === "portal";
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
-      <main style="--accent: ${this._settings.accent}">
+      <main class="${isPortal ? "portal-shell" : ""}" style="--accent: ${this._settings.accent}">
         <header>
           <div class="brand">
             ${this._settings.logoUrl ? `<img src="${htmlEscape(this._settings.logoUrl)}" alt="">` : `<div class="mark">P</div>`}
@@ -611,18 +618,19 @@ class PowReportingPanel extends HTMLElement {
               <p>${totals.outletsOn} of ${totals.outletCount} outlets on · ${this._entities.length} reporting entities</p>
             </div>
           </div>
-          <nav>
+          ${isPortal ? "" : `<nav>
             ${this._tabButton("dashboard", "Dashboard")}
             ${this._tabButton("outlets", "Outlets")}
             ${this._tabButton("reports", "Reports")}
             ${this._tabButton("settings", "Settings")}
-          </nav>
+          </nav>`}
         </header>
         ${this._notice ? `<p class="notice">${htmlEscape(this._notice)}</p>` : ""}
-        ${this._activeTab === "dashboard" ? this._dashboard(totals, powerRows, energyRows) : ""}
-        ${this._activeTab === "outlets" ? this._outletsView() : ""}
-        ${this._activeTab === "reports" ? this._reports() : ""}
-        ${this._activeTab === "settings" ? this._settingsView() : ""}
+        ${isPortal ? this._portalView(totals) : ""}
+        ${!isPortal && this._activeTab === "dashboard" ? this._dashboard(totals, powerRows, energyRows) : ""}
+        ${!isPortal && this._activeTab === "outlets" ? this._outletsView() : ""}
+        ${!isPortal && this._activeTab === "reports" ? this._reports() : ""}
+        ${!isPortal && this._activeTab === "settings" ? this._settingsView() : ""}
       </main>
     `;
 
@@ -653,6 +661,10 @@ class PowReportingPanel extends HTMLElement {
       this._render();
     });
     this.shadowRoot.querySelector("#save-billing-settings")?.addEventListener("click", () => this._saveBillingSettings());
+    this.shadowRoot.querySelector("#portal-search")?.addEventListener("input", (event) => {
+      this._portalQuery = event.target.value;
+      this._requestRender();
+    });
     this.shadowRoot.querySelector("#master-all-off")?.addEventListener("click", () => this._allOff());
     this.shadowRoot.querySelectorAll("[data-outlet-action]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -679,12 +691,14 @@ class PowReportingPanel extends HTMLElement {
   }
 
   _dashboard(totals, powerRows, energyRows) {
+    const billingTotals = this._billingTotals(this._filteredBillingSessions());
+    const currency = this._billingReport.settings?.currency || "AUD";
     return `
       <section class="summary-grid">
         <article><span>Live load</span><strong>${formatNumber(totals.powerWatts, 0)} W</strong></article>
         <article><span>Outlets on</span><strong>${totals.outletsOn} / ${totals.outletCount}</strong></article>
-        <article><span>Power sensors</span><strong>${totals.powerCount}</strong></article>
-        <article><span>Energy sensors</span><strong>${totals.energyCount}</strong></article>
+        <article><span>Billing energy</span><strong>${htmlEscape(formatEnergyKwh(billingTotals.energy, "kWh"))}</strong></article>
+        <article><span>Billing cost</span><strong>${htmlEscape(formatCurrency(billingTotals.cost, currency))}</strong></article>
       </section>
       ${this._registryError ? `<p class="notice">${this._registryError}</p>` : ""}
       <section class="columns">
@@ -697,6 +711,67 @@ class PowReportingPanel extends HTMLElement {
           <div class="table">${energyRows.map((row) => this._entityRow(row, formatEnergyKwh(row.entity.state, row.entity.attributes.unit_of_measurement))).join("") || `<div class="empty">No matching energy sensors found.</div>`}</div>
         </div>
       </section>
+    `;
+  }
+
+  _portalView(totals) {
+    const query = this._portalQuery.trim().toLowerCase();
+    const activeSessions = this._billingReport.active || [];
+    const filtered = this._outlets.filter((outlet) => {
+      const session = activeSessions.find((item) => item.switch_entity_id === outlet.entity.entity_id);
+      const text = [
+        outlet.name,
+        outlet.entity.entity_id,
+        outlet.device?.name_by_user,
+        outlet.device?.name,
+        session?.reference,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return !query || text.includes(query);
+    });
+    const billingTotals = this._billingTotals(this._filteredBillingSessions());
+    const currency = this._billingReport.settings?.currency || "AUD";
+    return `
+      <section class="portal-hero">
+        <div>
+          <span>EV outlet usage</span>
+          <h2>${totals.outletsOn} active charging bays</h2>
+          <p>${htmlEscape(formatPowerWatts({ state: totals.powerWatts, attributes: { unit_of_measurement: "W" } }))} live load · ${htmlEscape(formatCurrency(billingTotals.cost, currency))} billed in selected period</p>
+        </div>
+        <label>Find bay, outlet, or reference<input id="portal-search" value="${htmlEscape(this._portalQuery)}" placeholder="Bay 4, Smith, L2-B2"></label>
+      </section>
+      <section class="portal-grid">
+        ${filtered.map((outlet) => this._portalCard(outlet)).join("") || `<div class="empty">No matching charging bays found.</div>`}
+      </section>
+    `;
+  }
+
+  _portalCard(outlet) {
+    const switchEntityId = outlet.entity.entity_id;
+    const isOn = outlet.entity.state === "on";
+    const session = (this._billingReport.active || []).find((item) => item.switch_entity_id === switchEntityId);
+    const power = outlet.power ? formatPowerWatts(outlet.power.entity) : "--";
+    const energy = outlet.energy ? formatEnergyKwh(outlet.energy.entity.state, outlet.energy.entity.attributes.unit_of_measurement) : "--";
+    return `
+      <article class="portal-card ${isOn ? "is-on" : ""}">
+        <div class="charge-visual">
+          <span class="vehicle">EV</span>
+          <i></i>
+          <span class="charger">${isOn ? "ON" : "OFF"}</span>
+        </div>
+        <div class="outlet-top">
+          <div>
+            <h2>${htmlEscape(outlet.name)}</h2>
+            <p>${htmlEscape(session?.reference || outlet.device?.name_by_user || switchEntityId)}</p>
+          </div>
+          <span class="status">${isOn ? "Charging" : "Inactive"}</span>
+        </div>
+        <div class="meter-row">
+          <span><b>${htmlEscape(power)}</b><small>Live load</small></span>
+          <span><b>${htmlEscape(energy)}</b><small>Meter</small></span>
+          <span><b>${session ? htmlEscape(formatDuration(session.duration_seconds)) : "--"}</b><small>Charging for</small></span>
+          <span><b>${session ? htmlEscape(formatCurrency(session.cost, session.currency)) : "--"}</b><small>Session cost</small></span>
+        </div>
+      </article>
     `;
   }
 
@@ -923,7 +998,7 @@ class PowReportingPanel extends HTMLElement {
       button:disabled { opacity: .45; cursor: default; }
       button:disabled:hover { background: #fff; color: #172026; }
       .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
-      article, .report-card, .settings, .table, .master-control, .audit-card, .rename-tool, .billing-card { background: #fff; border: 1px solid #dde3e7; border-radius: 8px; }
+      article, .report-card, .settings, .table, .master-control, .audit-card, .rename-tool, .billing-card, .portal-hero, .portal-card { background: #fff; border: 1px solid #dde3e7; border-radius: 8px; }
       article { padding: 16px; }
       article span { display: block; color: #5d6972; font-size: 13px; margin-bottom: 8px; }
       article strong { display: block; font-size: 28px; line-height: 1; }
@@ -955,6 +1030,21 @@ class PowReportingPanel extends HTMLElement {
       .meter-row small { color: #5d6972; }
       .outlet-actions { display: flex; gap: 8px; }
       .outlet-actions button { flex: 1; }
+      .portal-shell { background: radial-gradient(circle at 12% 8%, color-mix(in srgb, var(--accent), transparent 78%), transparent 32%), linear-gradient(135deg, #081312, #12201f 52%, #0d1418); color: #e8f7f5; }
+      .portal-shell header { color: #e8f7f5; }
+      .portal-shell .brand p, .portal-shell p, .portal-shell small, .portal-shell label { color: #b9c9c8; }
+      .portal-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 380px); gap: 18px; align-items: end; padding: 22px; margin-bottom: 18px; color: #e8f7f5; background: linear-gradient(90deg, rgba(255,255,255,.1), rgba(255,255,255,.04)), repeating-linear-gradient(110deg, rgba(255,255,255,.05) 0 1px, transparent 1px 42px); border-color: rgba(255,255,255,.14); }
+      .portal-hero span { color: var(--accent); font-size: 13px; font-weight: 800; text-transform: uppercase; }
+      .portal-hero h2 { margin: 4px 0 8px; font-size: 34px; line-height: 1.05; }
+      .portal-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+      .portal-card { display: grid; gap: 14px; padding: 16px; color: #e8f7f5; background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.13); box-shadow: 0 18px 46px rgba(0,0,0,.18); }
+      .portal-card.is-on { border-color: color-mix(in srgb, var(--accent), white 15%); box-shadow: inset 4px 0 0 var(--accent), 0 0 34px color-mix(in srgb, var(--accent), transparent 78%); }
+      .portal-card .meter-row span { background: rgba(255,255,255,.08); }
+      .charge-visual { display: grid; grid-template-columns: auto minmax(60px, 1fr) auto; gap: 10px; align-items: center; color: var(--accent); }
+      .charge-visual span { display: grid; place-items: center; width: 48px; height: 36px; border-radius: 8px; background: color-mix(in srgb, var(--accent), transparent 82%); font-size: 12px; font-weight: 800; }
+      .charge-visual i { height: 5px; border-radius: 999px; background: linear-gradient(90deg, transparent, var(--accent), #67e8f9, transparent); background-size: 140px 100%; animation: chargeFlow 1.3s linear infinite; opacity: .75; }
+      .portal-card:not(.is-on) .charge-visual i { animation: none; background: rgba(255,255,255,.16); }
+      @keyframes chargeFlow { from { background-position: -140px 0; } to { background-position: 140px 0; } }
       .audit-card { padding: 16px; }
       .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
       .audit-table { overflow: hidden; border: 1px solid #edf0f2; border-radius: 8px; }
@@ -988,6 +1078,7 @@ class PowReportingPanel extends HTMLElement {
       @media (max-width: 760px) {
         main { padding: 14px; }
         header, .columns { grid-template-columns: 1fr; display: grid; }
+        .portal-hero { grid-template-columns: 1fr; }
         nav { overflow-x: auto; }
         .summary-grid, .billing-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .master-control, .audit-row, .rename-row, .billing-row { grid-template-columns: 1fr; }
