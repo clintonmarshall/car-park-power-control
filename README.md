@@ -13,10 +13,13 @@ The integration adds a sidebar panel with:
 - customer, bay, booking, or car park spot references before energising an
   outlet
 - centrally stored outlet on/off audit logs with timestamps
+- persisted charging sessions and billing reports stored in Home Assistant
+- configurable energy rate and currency for billing reports
+- live charge timers on managed outlets
 - current load, total energy, and per-device/entity summaries
 - daily, weekly, monthly, and custom-range reports
 - charting from Home Assistant recorder statistics when available
-- CSV export for energy statistics and outlet power events
+- CSV export for energy statistics, outlet power events, and billing sessions
 - local dashboard branding controls for name, logo URL, and accent color
 
 ## Install with HACS
@@ -64,6 +67,76 @@ Assistant storage. Each record includes:
 The dashboard requires a reference before turning an outlet on. Turning an
 outlet off reuses the active reference where available. The master **ALL Off**
 action logs one off event per managed outlet.
+
+### Home Assistant Entity Naming
+
+The HACS dashboard Settings tab includes a **Home Assistant Entity Naming** tool.
+It previews and then optionally applies display names based on HA Floor, Area,
+and Bay/Spot labels.
+
+For example, a device on `Level 1` with label `Bay 7` is named:
+
+- `L1-B7 Control` for the outlet switch
+- `L1-B7 Watts` for power
+- `L1-B7 Amps` for current
+- `L1-B7 Voltage` for voltage
+- `L1-B7 Wh` for energy
+- `L1-B7 Daily Wh` for daily energy, where present
+
+The tool changes Home Assistant entity display names only. It does not rename
+raw `entity_id` values, which keeps existing automations, history, and dashboards
+safer.
+
+## Self-contained HACS Portal
+
+The operational portal is served by the HACS custom integration as a Home
+Assistant sidebar panel. No separate Node/Express service is required for a
+fresh Home Assistant installation.
+
+The panel stores charge sessions and billing settings in Home Assistant storage
+under `.storage/pow_reporting.billing`. Outlet audit events are stored under
+`.storage/pow_reporting.outlet_log`.
+
+Charging sessions are recorded when outlets are controlled through the HACS
+panel:
+
+- Power On records the reference, start time, current energy meter reading, and
+  current rate.
+- Power Off records end time, end meter reading, duration, kWh used, and cost.
+- Master ALL Off completes active sessions for every outlet it successfully
+  turns off.
+
+Home Assistant Recorder remains the source for raw sensor history and charting.
+The HACS integration owns the commercial/session context: reference, rate,
+start/end readings, and billing totals.
+
+### Outlet Mapping
+
+The HACS portal reads Home Assistant registries for outlet metadata:
+
+- Home Assistant **Area** becomes the portal area, such as `L1 Parking`
+- The Area's Home Assistant **Floor** becomes the portal level, such as `Level 1`
+- Home Assistant **Labels** named like `Bay 7`, `Spot 014`, or `Space A12`
+  become the portal bay/spot
+
+Assign the ESPHome/Sonoff device to an Area in Home Assistant, put that Area on
+a Floor, and add a Bay/Spot label to the device or switch entity. The HACS panel
+will pick those changes up on the next refresh.
+
+## ESP Display Panel
+
+The `display/parking_power_panel/` folder contains first-pass Arduino/LVGL
+firmware for the JC1060P470C_I_W_Y 7 inch ESP32-P4 display.
+
+It provides:
+
+- live total load / outlets on / energy today summary
+- parking spot lookup with on-screen keypad
+- outlet detail screen
+- power on/off controls through the Home Assistant API
+
+The display firmware is still a companion client. The core portal, reporting,
+and billing logic lives inside the HACS integration.
 
 ## Notes
 
