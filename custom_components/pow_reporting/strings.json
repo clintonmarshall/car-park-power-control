@@ -13,7 +13,8 @@
           "entity_filter": "Entity filter keywords",
           "enable_customer_portal": "Enable customer charging portal",
           "portal_name": "Customer portal name",
-          "portal_url_path": "Customer portal URL path"
+          "portal_url_path": "Customer portal URL path",
+          "public_port": "Public portal TCP port"
         }
       }
     }
@@ -30,7 +31,8 @@
           "entity_filter": "Entity filter keywords",
           "enable_customer_portal": "Enable customer charging portal",
           "portal_name": "Customer portal name",
-          "portal_url_path": "Customer portal URL path"
+          "portal_url_path": "Customer portal URL path",
+          "public_port": "Public portal TCP port"
         }
       }
     }

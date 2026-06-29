@@ -16,12 +16,14 @@ from .const import (
     CONF_LOGO_URL,
     CONF_PORTAL_NAME,
     CONF_PORTAL_URL_PATH,
+    CONF_PUBLIC_PORT,
     CONF_SIDEBAR_ICON,
     CONF_URL_PATH,
     DEFAULT_DASHBOARD_NAME,
     DEFAULT_ENTITY_FILTER,
     DEFAULT_PORTAL_NAME,
     DEFAULT_PORTAL_URL_PATH,
+    DEFAULT_PUBLIC_PORT,
     DEFAULT_SIDEBAR_ICON,
     DEFAULT_URL_PATH,
     DOMAIN,
@@ -64,6 +66,10 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
                 CONF_PORTAL_URL_PATH,
                 default=defaults.get(CONF_PORTAL_URL_PATH, DEFAULT_PORTAL_URL_PATH),
             ): str,
+            vol.Optional(
+                CONF_PUBLIC_PORT,
+                default=defaults.get(CONF_PUBLIC_PORT, DEFAULT_PUBLIC_PORT),
+            ): int,
         }
     )
 

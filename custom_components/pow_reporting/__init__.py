@@ -28,12 +28,14 @@ from .const import (
     CONF_LOGO_URL,
     CONF_PORTAL_NAME,
     CONF_PORTAL_URL_PATH,
+    CONF_PUBLIC_PORT,
     CONF_SIDEBAR_ICON,
     CONF_URL_PATH,
     DEFAULT_DASHBOARD_NAME,
     DEFAULT_ENTITY_FILTER,
     DEFAULT_PORTAL_NAME,
     DEFAULT_PORTAL_URL_PATH,
+    DEFAULT_PUBLIC_PORT,
     DEFAULT_SIDEBAR_ICON,
     DEFAULT_URL_PATH,
     DOMAIN,
@@ -63,6 +65,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional(CONF_ENABLE_CUSTOMER_PORTAL, default=True): cv.boolean,
                 vol.Optional(CONF_PORTAL_NAME, default=DEFAULT_PORTAL_NAME): cv.string,
                 vol.Optional(CONF_PORTAL_URL_PATH, default=DEFAULT_PORTAL_URL_PATH): cv.string,
+                vol.Optional(CONF_PUBLIC_PORT, default=DEFAULT_PUBLIC_PORT): cv.port,
             }
         )
     },
@@ -76,10 +79,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
     yaml_config = config.get(DOMAIN)
     if yaml_config is None:
-        _async_register_public_http(hass, {})
+        await _async_register_public_http(hass, {})
         return True
 
-    _async_register_public_http(hass, yaml_config)
+    await _async_register_public_http(hass, yaml_config)
     await _async_register_dashboard(hass, yaml_config)
     return True
 
@@ -89,7 +92,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _async_register_websocket_commands(hass)
 
     options = {**entry.data, **entry.options}
-    _async_register_public_http(hass, options)
+    await _async_register_public_http(hass, options)
     await _async_register_dashboard(hass, options)
 
     entry.async_on_unload(
@@ -110,24 +113,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-def _async_register_public_http(
+async def _async_register_public_http(
     hass: HomeAssistant,
     options: dict[str, Any],
 ) -> None:
     """Register unauthenticated public portal views served by Home Assistant."""
     data = hass.data.setdefault(DOMAIN, {})
     data["public_options"] = options
-    if data.get("public_http_registered"):
+    if not data.get("public_http_registered"):
+        hass.http.register_view(ParkPowerPublicPortalView())
+        hass.http.register_view(ParkPowerPublicSettingsView())
+        hass.http.register_view(ParkPowerPublicSummaryView())
+        hass.http.register_view(ParkPowerPublicOutletsView())
+        hass.http.register_view(ParkPowerPublicBillingView())
+        hass.http.register_view(ParkPowerPublicControlView())
+        hass.http.register_view(ParkPowerPublicAllOffView())
+        data["public_http_registered"] = True
+
+    await _async_start_public_portal_server(hass, options)
+
+
+async def _async_start_public_portal_server(
+    hass: HomeAssistant,
+    options: dict[str, Any],
+) -> None:
+    """Start the standalone public portal listener on its own TCP port."""
+    data = hass.data.setdefault(DOMAIN, {})
+    port = int(options.get(CONF_PUBLIC_PORT, DEFAULT_PUBLIC_PORT) or DEFAULT_PUBLIC_PORT)
+    if data.get("public_runner") and data.get("public_port") == port:
         return
 
-    hass.http.register_view(ParkPowerPublicPortalView())
-    hass.http.register_view(ParkPowerPublicSettingsView())
-    hass.http.register_view(ParkPowerPublicSummaryView())
-    hass.http.register_view(ParkPowerPublicOutletsView())
-    hass.http.register_view(ParkPowerPublicBillingView())
-    hass.http.register_view(ParkPowerPublicControlView())
-    hass.http.register_view(ParkPowerPublicAllOffView())
-    data["public_http_registered"] = True
+    runner = data.pop("public_runner", None)
+    if runner is not None:
+        await runner.cleanup()
+
+    app = web.Application()
+    app["hass"] = hass
+    app.router.add_get("/", _public_portal_http_handler)
+    app.router.add_get("/parkpower-public", _public_portal_http_handler)
+    app.router.add_get("/api/parkpower-public/settings", _public_settings_http_handler)
+    app.router.add_get("/api/parkpower-public/summary", _public_summary_http_handler)
+    app.router.add_get("/api/parkpower-public/outlets", _public_outlets_http_handler)
+    app.router.add_get("/api/parkpower-public/billing", _public_billing_http_handler)
+    app.router.add_post("/api/parkpower-public/outlets/{entity_id}/control", _public_control_http_handler)
+    app.router.add_post("/api/parkpower-public/all-off", _public_all_off_http_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    data["public_runner"] = runner
+    data["public_port"] = port
+    data["public_url"] = f"http://0.0.0.0:{port}"
+
+
+async def _async_stop_public_portal_server(hass: HomeAssistant) -> None:
+    """Stop the standalone public portal listener."""
+    data = hass.data.setdefault(DOMAIN, {})
+    runner = data.pop("public_runner", None)
+    data.pop("public_port", None)
+    data.pop("public_url", None)
+    if runner is not None:
+        await runner.cleanup()
 
 
 async def _async_register_dashboard(
@@ -648,6 +695,135 @@ async def _public_billing_report(hass: HomeAssistant, period: str) -> dict[str, 
     }
 
 
+async def _public_portal_http_handler(request: web.Request) -> web.Response:
+    """Return the public portal HTML for either HA HTTP or the public port."""
+    return web.FileResponse(Path(__file__).parent / "frontend" / "public-portal.html")
+
+
+async def _public_settings_http_handler(request: web.Request) -> web.Response:
+    """Return public portal settings."""
+    hass = request.app["hass"]
+    options = _public_options(hass)
+    return web.json_response(
+        {
+            "name": options.get(CONF_PORTAL_NAME) or options.get(CONF_DASHBOARD_NAME, DEFAULT_DASHBOARD_NAME),
+            "logo_url": options.get(CONF_LOGO_URL, ""),
+            "accent": "#0f766e",
+        }
+    )
+
+
+async def _public_summary_http_handler(request: web.Request) -> web.Response:
+    """Return public summary data."""
+    return web.json_response(await _public_summary(request.app["hass"]))
+
+
+async def _public_outlets_http_handler(request: web.Request) -> web.Response:
+    """Return public outlet data."""
+    return web.json_response({"outlets": await _public_outlet_data(request.app["hass"])})
+
+
+async def _public_billing_http_handler(request: web.Request) -> web.Response:
+    """Return public billing data."""
+    period = request.query.get("period", "day")
+    if period not in {"day", "week", "month", "all"}:
+        period = "day"
+    return web.json_response(await _public_billing_report(request.app["hass"], period))
+
+
+async def _public_control_http_handler(
+    request: web.Request,
+    entity_id: str | None = None,
+) -> web.Response:
+    """Control one outlet from the public portal."""
+    hass = request.app["hass"]
+    entity_id = entity_id or request.match_info["entity_id"]
+    body = await request.json()
+    action = body.get("action")
+    if action not in {"turn_on", "turn_off"}:
+        return web.json_response({"error": "Invalid action"}, status=400)
+    reference = str(body.get("reference", "")).strip()
+    if action == "turn_on" and not reference:
+        return web.json_response({"error": "Reference is required before powering an outlet on"}, status=400)
+    outlet_name = str(body.get("outlet_name", "")).strip() or entity_id
+    try:
+        await hass.services.async_call("switch", action, {"entity_id": entity_id}, blocking=True)
+        event = await _async_log_outlet_event(
+            hass,
+            switch_entity_id=entity_id,
+            action=action,
+            reference=reference,
+            outlet_name=outlet_name,
+            success=True,
+        )
+        await _async_record_session_event(
+            hass,
+            switch_entity_id=entity_id,
+            action=action,
+            reference=reference,
+            outlet_name=outlet_name,
+            event=event,
+        )
+        return web.json_response({"event": event})
+    except Exception as err:  # noqa: BLE001 - surfaced to public UI
+        event = await _async_log_outlet_event(
+            hass,
+            switch_entity_id=entity_id,
+            action=action,
+            reference=reference,
+            outlet_name=outlet_name,
+            success=False,
+            error=str(err),
+        )
+        return web.json_response({"error": str(err), "event": event}, status=500)
+
+
+async def _public_all_off_http_handler(request: web.Request) -> web.Response:
+    """Turn all supplied public portal outlets off."""
+    hass = request.app["hass"]
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return web.json_response({"error": "At least one outlet is required"}, status=400)
+    reference = str(body.get("reference", "")).strip() or "Public portal ALL Off"
+    events = []
+    for entity_id in ids:
+        state = hass.states.get(entity_id)
+        outlet_name = _state_name(state, entity_id)
+        try:
+            await hass.services.async_call("switch", "turn_off", {"entity_id": entity_id}, blocking=True)
+            event = await _async_log_outlet_event(
+                hass,
+                switch_entity_id=entity_id,
+                action="turn_off",
+                reference=reference,
+                outlet_name=outlet_name,
+                success=True,
+            )
+            await _async_record_session_event(
+                hass,
+                switch_entity_id=entity_id,
+                action="turn_off",
+                reference=reference,
+                outlet_name=outlet_name,
+                event=event,
+            )
+            events.append(event)
+        except Exception as err:  # noqa: BLE001 - surfaced to public UI
+            events.append(
+                await _async_log_outlet_event(
+                    hass,
+                    switch_entity_id=entity_id,
+                    action="turn_off",
+                    reference=reference,
+                    outlet_name=outlet_name,
+                    success=False,
+                    error=str(err),
+                )
+            )
+    return web.json_response({"events": events})
+
+
 class ParkPowerPublicPortalView(HomeAssistantView):
     """Serve the unauthenticated public ParkPower portal."""
 
@@ -657,7 +833,7 @@ class ParkPowerPublicPortalView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Return the public portal HTML."""
-        return web.FileResponse(Path(__file__).parent / "frontend" / "public-portal.html")
+        return await _public_portal_http_handler(request)
 
 
 class ParkPowerPublicSettingsView(HomeAssistantView):
@@ -669,15 +845,7 @@ class ParkPowerPublicSettingsView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Return branding settings."""
-        hass = request.app["hass"]
-        options = _public_options(hass)
-        return web.json_response(
-            {
-                "name": options.get(CONF_PORTAL_NAME) or options.get(CONF_DASHBOARD_NAME, DEFAULT_DASHBOARD_NAME),
-                "logo_url": options.get(CONF_LOGO_URL, ""),
-                "accent": "#0f766e",
-            }
-        )
+        return await _public_settings_http_handler(request)
 
 
 class ParkPowerPublicSummaryView(HomeAssistantView):
@@ -689,7 +857,7 @@ class ParkPowerPublicSummaryView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Return summary data."""
-        return web.json_response(await _public_summary(request.app["hass"]))
+        return await _public_summary_http_handler(request)
 
 
 class ParkPowerPublicOutletsView(HomeAssistantView):
@@ -701,7 +869,7 @@ class ParkPowerPublicOutletsView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Return outlet data."""
-        return web.json_response({"outlets": await _public_outlet_data(request.app["hass"])})
+        return await _public_outlets_http_handler(request)
 
 
 class ParkPowerPublicBillingView(HomeAssistantView):
@@ -713,10 +881,7 @@ class ParkPowerPublicBillingView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Return public billing data."""
-        period = request.query.get("period", "day")
-        if period not in {"day", "week", "month", "all"}:
-            period = "day"
-        return web.json_response(await _public_billing_report(request.app["hass"], period))
+        return await _public_billing_http_handler(request)
 
 
 class ParkPowerPublicControlView(HomeAssistantView):
@@ -728,45 +893,7 @@ class ParkPowerPublicControlView(HomeAssistantView):
 
     async def post(self, request: web.Request, entity_id: str) -> web.Response:
         """Control one outlet."""
-        hass = request.app["hass"]
-        body = await request.json()
-        action = body.get("action")
-        if action not in {"turn_on", "turn_off"}:
-            return web.json_response({"error": "Invalid action"}, status=400)
-        reference = str(body.get("reference", "")).strip()
-        if action == "turn_on" and not reference:
-            return web.json_response({"error": "Reference is required before powering an outlet on"}, status=400)
-        outlet_name = str(body.get("outlet_name", "")).strip() or entity_id
-        try:
-            await hass.services.async_call("switch", action, {"entity_id": entity_id}, blocking=True)
-            event = await _async_log_outlet_event(
-                hass,
-                switch_entity_id=entity_id,
-                action=action,
-                reference=reference,
-                outlet_name=outlet_name,
-                success=True,
-            )
-            await _async_record_session_event(
-                hass,
-                switch_entity_id=entity_id,
-                action=action,
-                reference=reference,
-                outlet_name=outlet_name,
-                event=event,
-            )
-            return web.json_response({"event": event})
-        except Exception as err:  # noqa: BLE001 - surfaced to public UI
-            event = await _async_log_outlet_event(
-                hass,
-                switch_entity_id=entity_id,
-                action=action,
-                reference=reference,
-                outlet_name=outlet_name,
-                success=False,
-                error=str(err),
-            )
-            return web.json_response({"error": str(err), "event": event}, status=500)
+        return await _public_control_http_handler(request, entity_id)
 
 
 class ParkPowerPublicAllOffView(HomeAssistantView):
@@ -778,48 +905,7 @@ class ParkPowerPublicAllOffView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Turn all supplied outlets off."""
-        hass = request.app["hass"]
-        body = await request.json()
-        ids = body.get("ids")
-        if not isinstance(ids, list) or not ids:
-            return web.json_response({"error": "At least one outlet is required"}, status=400)
-        reference = str(body.get("reference", "")).strip() or "Public portal ALL Off"
-        events = []
-        for entity_id in ids:
-            state = hass.states.get(entity_id)
-            outlet_name = _state_name(state, entity_id)
-            try:
-                await hass.services.async_call("switch", "turn_off", {"entity_id": entity_id}, blocking=True)
-                event = await _async_log_outlet_event(
-                    hass,
-                    switch_entity_id=entity_id,
-                    action="turn_off",
-                    reference=reference,
-                    outlet_name=outlet_name,
-                    success=True,
-                )
-                await _async_record_session_event(
-                    hass,
-                    switch_entity_id=entity_id,
-                    action="turn_off",
-                    reference=reference,
-                    outlet_name=outlet_name,
-                    event=event,
-                )
-                events.append(event)
-            except Exception as err:  # noqa: BLE001 - surfaced to public UI
-                events.append(
-                    await _async_log_outlet_event(
-                        hass,
-                        switch_entity_id=entity_id,
-                        action="turn_off",
-                        reference=reference,
-                        outlet_name=outlet_name,
-                        success=False,
-                        error=str(err),
-                    )
-                )
-        return web.json_response({"events": events})
+        return await _public_all_off_http_handler(request)
 
 
 @websocket_api.websocket_command(
@@ -1272,6 +1358,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the dashboard panel."""
     options = {**entry.data, **entry.options}
     frontend.async_remove_panel(hass, options.get(CONF_URL_PATH, DEFAULT_URL_PATH))
+    frontend.async_remove_panel(hass, options.get(CONF_PORTAL_URL_PATH, DEFAULT_PORTAL_URL_PATH))
+    await _async_stop_public_portal_server(hass)
     return True
 
 
