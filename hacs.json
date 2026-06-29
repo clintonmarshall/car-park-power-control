@@ -1,7 +1,6 @@
 {
-  "name": "Sonoff POW Energy Reporter",
+  "name": "Adaptive Services ParkPower",
   "render_readme": true,
   "domains": ["sensor"],
   "homeassistant": "2024.6.0"
 }
-

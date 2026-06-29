@@ -1,10 +1,10 @@
 {
-  "title": "Sonoff POW Energy Reporter",
+  "title": "Adaptive Services ParkPower",
   "config": {
     "step": {
       "user": {
-        "title": "Set up the reporting dashboard",
-        "description": "Create a sidebar dashboard for ESPHome/Sonoff POW power monitoring.",
+        "title": "Set up Adaptive Services ParkPower",
+        "description": "Create ParkPower admin and customer portal dashboards for managed car park outlet monitoring.",
         "data": {
           "dashboard_name": "Dashboard name",
           "url_path": "Sidebar URL path",
@@ -21,7 +21,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "Dashboard settings",
+        "title": "ParkPower settings",
         "data": {
           "dashboard_name": "Dashboard name",
           "url_path": "Sidebar URL path",

@@ -85,7 +85,7 @@ class PowReportingPanel extends HTMLElement {
     this._pendingRender = false;
     this._renderTimer = undefined;
     this._settings = {
-      name: "Power Reporting",
+      name: "Adaptive Services ParkPower",
       logoUrl: "",
       accent: "#0f766e",
       filter: "sonoff,pow,esphome",
@@ -673,7 +673,7 @@ class PowReportingPanel extends HTMLElement {
     });
     this.shadowRoot.querySelector("#save-settings")?.addEventListener("click", () => {
       this._settings = {
-        name: this.shadowRoot.querySelector("#setting-name").value.trim() || "Power Reporting",
+        name: this.shadowRoot.querySelector("#setting-name").value.trim() || "Adaptive Services ParkPower",
         logoUrl: this.shadowRoot.querySelector("#setting-logo").value.trim(),
         accent: this.shadowRoot.querySelector("#setting-accent").value || "#0f766e",
         filter: this.shadowRoot.querySelector("#setting-filter").value.trim(),

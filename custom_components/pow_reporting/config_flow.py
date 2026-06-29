@@ -1,4 +1,4 @@
-"""Config flow for Sonoff POW Energy Reporter."""
+"""Config flow for Adaptive Services ParkPower."""
 
 from __future__ import annotations
 

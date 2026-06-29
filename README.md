@@ -1,4 +1,4 @@
-# Car Park Power Control
+# Adaptive Services ParkPower
 
 A HACS-ready Home Assistant custom integration for commercial-style monitoring of
 ESPHome/Sonoff POW power and energy devices in managed car park charging
@@ -26,12 +26,12 @@ The integration adds a sidebar panel with:
 
 1. Publish this repository to GitHub.
 2. In Home Assistant, open HACS.
-3. Add `https://github.com/clintonmarshall/car-park-power-control` as a custom
+3. Add `https://github.com/clintonmarshall/ParkPower` as a custom
    repository with category `Integration`.
-4. Install `Car Park Power Control`.
+4. Install `Adaptive Services ParkPower`.
 5. Restart Home Assistant.
 6. Go to **Settings > Devices & services > Add integration** and add
-   `Sonoff POW Energy Reporter`.
+   `Adaptive Services ParkPower`.
 
 ## Local/manual install
 
@@ -95,15 +95,15 @@ fresh Home Assistant installation.
 
 By default it registers two Home Assistant routes on port `8123`:
 
-- `/pow-reporting` for the admin dashboard, outlet controls, settings, entity
+- `/parkpower` for the admin dashboard, outlet controls, settings, entity
   naming tools, and reports
-- `/pow-portal` for the customer-style charging portal view
+- `/parkpower-portal` for the customer-style charging portal view
 
 For example:
 
 ```text
-http://homeassistant.local:8123/pow-reporting
-http://homeassistant.local:8123/pow-portal
+http://homeassistant.local:8123/parkpower
+http://homeassistant.local:8123/parkpower-portal
 ```
 
 Both routes are served by Home Assistant and use Home Assistant authentication.

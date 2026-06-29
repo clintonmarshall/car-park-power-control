@@ -1,4 +1,4 @@
-"""Sonoff POW Energy Reporter integration."""
+"""Adaptive Services ParkPower integration."""
 
 from __future__ import annotations
 
