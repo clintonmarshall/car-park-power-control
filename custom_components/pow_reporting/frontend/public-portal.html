@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ParkPower Portal</title>
+    <style>
+      :root { --accent: #0f766e; --bg: #081312; --panel: rgba(255,255,255,.09); --line: rgba(255,255,255,.16); --text: #e8f7f5; --muted: #b9c9c8; --danger: #dc2626; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--text); background: radial-gradient(circle at 10% 5%, color-mix(in srgb, var(--accent), transparent 72%), transparent 28%), linear-gradient(135deg, #081312, #12201f 55%, #0d1418); }
+      main { width: min(1280px, 100%); margin: 0 auto; padding: 24px; }
+      header { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 20px; }
+      .brand { display: flex; gap: 14px; align-items: center; min-width: 0; }
+      .brand img, .mark { width: 52px; height: 52px; border-radius: 8px; background: #fff; object-fit: contain; }
+      .mark { display: grid; place-items: center; background: var(--accent); color: white; font-size: 26px; font-weight: 800; }
+      h1, h2, p { margin: 0; }
+      h1 { font-size: 26px; line-height: 1.1; }
+      p, small, label { color: var(--muted); }
+      button, input { font: inherit; }
+      button { border: 0; border-radius: 7px; padding: 10px 12px; background: var(--accent); color: white; font-weight: 750; cursor: pointer; }
+      button.secondary { background: rgba(255,255,255,.12); }
+      button.danger { background: var(--danger); }
+      button:disabled { opacity: .45; cursor: default; }
+      input { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 10px 11px; color: var(--text); background: rgba(255,255,255,.08); }
+      .hero, .card, .toolbar { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 18px 46px rgba(0,0,0,.18); }
+      .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 360px); gap: 18px; padding: 20px; margin-bottom: 16px; align-items: end; }
+      .hero span { color: var(--accent); font-size: 13px; font-weight: 800; text-transform: uppercase; }
+      .hero h2 { font-size: 36px; line-height: 1.05; margin: 4px 0 8px; }
+      .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+      .metric { padding: 15px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.07); }
+      .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+      .metric strong { display: block; font-size: 24px; line-height: 1; }
+      .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 340px) auto; gap: 12px; align-items: end; padding: 15px; margin-bottom: 16px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; }
+      .card { display: grid; gap: 14px; padding: 16px; }
+      .card.on { border-color: color-mix(in srgb, var(--accent), white 15%); box-shadow: inset 4px 0 0 var(--accent), 0 0 34px color-mix(in srgb, var(--accent), transparent 78%); }
+      .top { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+      .top p { margin-top: 4px; font-size: 12px; word-break: break-word; }
+      .status { border-radius: 999px; padding: 4px 9px; background: rgba(255,255,255,.13); color: var(--muted); font-size: 12px; font-weight: 800; }
+      .on .status { background: #dcfce7; color: #166534; }
+      .charge { display: grid; grid-template-columns: auto minmax(60px, 1fr) auto; gap: 10px; align-items: center; color: var(--accent); }
+      .charge span { display: grid; place-items: center; width: 48px; height: 36px; border-radius: 8px; background: color-mix(in srgb, var(--accent), transparent 82%); font-size: 12px; font-weight: 800; }
+      .charge i { height: 5px; border-radius: 999px; background: linear-gradient(90deg, transparent, var(--accent), #67e8f9, transparent); background-size: 140px 100%; animation: chargeFlow 1.3s linear infinite; opacity: .75; }
+      .card:not(.on) .charge i { animation: none; background: rgba(255,255,255,.16); }
+      @keyframes chargeFlow { from { background-position: -140px 0; } to { background-position: 140px 0; } }
+      .meters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .meters div { display: grid; gap: 4px; padding: 10px; border-radius: 7px; background: rgba(255,255,255,.08); }
+      .meters b { font-size: 18px; }
+      .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .notice { margin-bottom: 14px; padding: 14px 16px; border: 1px solid rgba(251,191,36,.45); border-radius: 8px; background: rgba(251,191,36,.14); color: #fde68a; }
+      @media (max-width: 760px) {
+        main { padding: 14px; }
+        header, .hero, .toolbar { grid-template-columns: 1fr; display: grid; }
+        .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .actions { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main id="app"></main>
+    <script>
+      const api = async (path, options = {}) => {
+        const response = await fetch(`/api/parkpower-public${path}`, {
+          ...options,
+          headers: { "content-type": "application/json", ...(options.headers || {}) },
+        });
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || response.statusText);
+        return response.json();
+      };
+      const esc = (value) => String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+      const money = (value, currency = "AUD") => Number.isFinite(Number(value)) ? new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(value)) : "--";
+      const number = (value, digits = 1) => Number.isFinite(Number(value)) ? new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(Number(value)) : "--";
+      const duration = (seconds) => {
+        const total = Math.max(0, Math.round(Number(seconds) || 0));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(total % 60).padStart(2, "0")}s`;
+      };
+      const state = { settings: {}, summary: {}, outlets: [], query: "", busy: new Set(), notice: "" };
+      async function load() {
+        try {
+          const [settings, summary, outletData] = await Promise.all([api("/settings"), api("/summary"), api("/outlets")]);
+          state.settings = settings;
+          state.summary = summary;
+          state.outlets = outletData.outlets || [];
+          document.documentElement.style.setProperty("--accent", settings.accent || "#0f766e");
+          render();
+        } catch (err) {
+          state.notice = err.message;
+          render();
+        }
+      }
+      async function control(outlet, action) {
+        const reference = document.querySelector(`[data-ref="${CSS.escape(outlet.id)}"]`)?.value.trim() || outlet.reference || "";
+        if (action === "turn_on" && !reference) {
+          state.notice = "Enter a customer, bay, or booking reference before turning power on.";
+          render();
+          return;
+        }
+        state.busy.add(outlet.id);
+        state.notice = "";
+        render();
+        try {
+          await api(`/outlets/${encodeURIComponent(outlet.id)}/control`, { method: "POST", body: JSON.stringify({ action, reference, outlet_name: outlet.name }) });
+          await load();
+        } catch (err) {
+          state.notice = err.message;
+          render();
+        } finally {
+          state.busy.delete(outlet.id);
+          render();
+        }
+      }
+      async function allOff() {
+        const reference = document.querySelector("#allOffRef")?.value.trim() || "Public portal ALL Off";
+        if (!confirm(`Turn off all ${state.outlets.length} outlets?`)) return;
+        state.notice = "";
+        try {
+          await api("/all-off", { method: "POST", body: JSON.stringify({ ids: state.outlets.map((outlet) => outlet.id), reference }) });
+          await load();
+        } catch (err) {
+          state.notice = err.message;
+          render();
+        }
+      }
+      function render() {
+        const query = state.query.toLowerCase();
+        const filtered = state.outlets.filter((outlet) => !query || [outlet.name, outlet.id, outlet.area, outlet.level, outlet.reference].filter(Boolean).join(" ").toLowerCase().includes(query));
+        document.title = state.settings.name || "ParkPower Portal";
+        document.querySelector("#app").innerHTML = `
+          <header>
+            <div class="brand">
+              ${state.settings.logo_url ? `<img src="${esc(state.settings.logo_url)}" alt="">` : `<div class="mark">P</div>`}
+              <div><h1>${esc(state.settings.name || "ParkPower Portal")}</h1><p>Public portal served by Home Assistant</p></div>
+            </div>
+            <button class="secondary" id="refresh">Refresh</button>
+          </header>
+          ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
+          <section class="hero">
+            <div><span>EV outlet usage</span><h2>${state.summary.outlets_on || 0} active charging bays</h2><p>${number(state.summary.total_power_w, 0)} W live load · ${money(state.summary.total_cost, state.summary.currency)} total metered cost</p></div>
+            <label>Find bay, outlet, or reference<input id="query" value="${esc(state.query)}" placeholder="Bay 4, Smith, L2-B2"></label>
+          </section>
+          <section class="metrics">
+            <div class="metric"><span>Live load</span><strong>${number(state.summary.total_power_w, 0)} W</strong></div>
+            <div class="metric"><span>Outlets on</span><strong>${state.summary.outlets_on || 0} / ${state.summary.outlet_count || 0}</strong></div>
+            <div class="metric"><span>Meter energy</span><strong>${number(state.summary.total_energy_kwh, 2)} kWh</strong></div>
+            <div class="metric"><span>Meter cost</span><strong>${money(state.summary.total_cost, state.summary.currency)}</strong></div>
+          </section>
+          <section class="toolbar">
+            <div><h2>Master Control</h2><p>Immediate shutdown for all public portal outlets.</p></div>
+            <input id="allOffRef" value="Public portal ALL Off" placeholder="Reason or reference">
+            <button class="danger" id="allOff">ALL Off</button>
+          </section>
+          <section class="grid">${filtered.map(card).join("") || `<div class="notice">No matching outlets found.</div>`}</section>
+        `;
+        document.querySelector("#refresh")?.addEventListener("click", load);
+        document.querySelector("#query")?.addEventListener("input", (event) => { state.query = event.target.value; render(); });
+        document.querySelector("#allOff")?.addEventListener("click", allOff);
+        document.querySelectorAll("[data-action]").forEach((button) => {
+          const outlet = state.outlets.find((item) => item.id === button.dataset.id);
+          button.addEventListener("click", () => control(outlet, button.dataset.action));
+        });
+      }
+      function card(outlet) {
+        const on = outlet.state === "on";
+        const busy = state.busy.has(outlet.id);
+        return `<article class="card ${on ? "on" : ""}">
+          <div class="charge"><span>EV</span><i></i><span>${on ? "ON" : "OFF"}</span></div>
+          <div class="top"><div><h2>${esc(outlet.name)}</h2><p>${esc(outlet.reference || outlet.area || outlet.id)}</p></div><span class="status">${on ? "Charging" : "Inactive"}</span></div>
+          <div class="meters">
+            <div><b>${number(outlet.power_w, 0)} W</b><small>Live load</small></div>
+            <div><b>${number(outlet.energy_kwh, 2)} kWh</b><small>Meter</small></div>
+            <div><b>${outlet.session ? duration(outlet.session.duration_seconds) : "--"}</b><small>Charging for</small></div>
+            <div><b>${outlet.session ? money(outlet.session.cost, outlet.session.currency) : "--"}</b><small>Session cost</small></div>
+          </div>
+          <label>Customer, bay, or booking reference<input data-ref="${esc(outlet.id)}" value="${esc(outlet.reference || "")}" placeholder="Bay 14 - Smith"></label>
+          <div class="actions">
+            <button data-action="turn_on" data-id="${esc(outlet.id)}" ${busy || on ? "disabled" : ""}>Power On</button>
+            <button class="danger" data-action="turn_off" data-id="${esc(outlet.id)}" ${busy || !on ? "disabled" : ""}>Power Off</button>
+          </div>
+        </article>`;
+      }
+      load();
+      window.setInterval(load, 10000);
+    </script>
+  </body>
+</html>

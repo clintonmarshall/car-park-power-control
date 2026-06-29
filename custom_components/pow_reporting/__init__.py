@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
+from aiohttp import web
 from homeassistant.components import frontend, panel_custom, websocket_api
-from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -75,8 +76,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
     yaml_config = config.get(DOMAIN)
     if yaml_config is None:
+        _async_register_public_http(hass, {})
         return True
 
+    _async_register_public_http(hass, yaml_config)
     await _async_register_dashboard(hass, yaml_config)
     return True
 
@@ -86,6 +89,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _async_register_websocket_commands(hass)
 
     options = {**entry.data, **entry.options}
+    _async_register_public_http(hass, options)
     await _async_register_dashboard(hass, options)
 
     entry.async_on_unload(
@@ -104,6 +108,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
     return True
+
+
+def _async_register_public_http(
+    hass: HomeAssistant,
+    options: dict[str, Any],
+) -> None:
+    """Register unauthenticated public portal views served by Home Assistant."""
+    data = hass.data.setdefault(DOMAIN, {})
+    data["public_options"] = options
+    if data.get("public_http_registered"):
+        return
+
+    hass.http.register_view(ParkPowerPublicPortalView())
+    hass.http.register_view(ParkPowerPublicSettingsView())
+    hass.http.register_view(ParkPowerPublicSummaryView())
+    hass.http.register_view(ParkPowerPublicOutletsView())
+    hass.http.register_view(ParkPowerPublicControlView())
+    hass.http.register_view(ParkPowerPublicAllOffView())
+    data["public_http_registered"] = True
 
 
 async def _async_register_dashboard(
@@ -416,6 +439,318 @@ def _billing_report(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]
         "completed": completed,
         "sessions": [*completed, *active],
     }
+
+
+def _public_options(hass: HomeAssistant) -> dict[str, Any]:
+    """Return current public portal options."""
+    return hass.data.setdefault(DOMAIN, {}).get("public_options", {})
+
+
+def _normalise_power_w(state: Any) -> float | None:
+    """Return a power state as watts."""
+    if state is None:
+        return None
+    try:
+        value = float(state.state)
+    except (TypeError, ValueError):
+        return None
+    unit = state.attributes.get("unit_of_measurement")
+    if unit == "kW":
+        return value * 1000
+    return value
+
+
+def _state_name(state: Any, fallback: str) -> str:
+    """Return a friendly name for a state."""
+    return state.attributes.get("friendly_name", fallback) if state is not None else fallback
+
+
+def _sensor_score(entity_id: str, state: Any, *, kind: str) -> int:
+    """Return a score for selecting the best sensor for a public outlet."""
+    text = " ".join(
+        str(item or "")
+        for item in [
+            entity_id,
+            getattr(state, "name", ""),
+            state.attributes.get("friendly_name") if state is not None else "",
+        ]
+    ).lower()
+    if kind == "power":
+        return 0
+    score = 0
+    if "total" in text:
+        score += 30
+    if "cumulative" in text:
+        score += 25
+    if "lifetime" in text:
+        score += 25
+    if "import" in text:
+        score += 10
+    if "daily" in text:
+        score -= 25
+    if "today" in text:
+        score -= 20
+    return score
+
+
+def _best_device_sensor(
+    hass: HomeAssistant,
+    entity_registry: Any,
+    device_id: str | None,
+    *,
+    kind: str,
+) -> tuple[str, Any] | tuple[None, None]:
+    """Find the best power or energy sensor for a device."""
+    if not device_id:
+        return None, None
+    candidates = []
+    for entry in getattr(entity_registry, "entities", {}).values():
+        entity_id = getattr(entry, "entity_id", "")
+        if getattr(entry, "device_id", None) != device_id or not entity_id.startswith("sensor."):
+            continue
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+        unit = state.attributes.get("unit_of_measurement")
+        device_class = state.attributes.get("device_class")
+        if kind == "power" and not (device_class == "power" or unit in {"W", "kW"}):
+            continue
+        if kind == "energy" and not (device_class == "energy" or unit in {"Wh", "kWh"}):
+            continue
+        candidates.append((_sensor_score(entity_id, state, kind=kind), entity_id, state))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1], candidates[0][2]
+
+
+async def _public_outlet_data(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Return outlet data for the unauthenticated public portal."""
+    options = _public_options(hass)
+    entity_filter = options.get(CONF_ENTITY_FILTER, DEFAULT_ENTITY_FILTER)
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    area_registry = ar.async_get(hass)
+    floor_registry = fr.async_get(hass)
+    label_registry = lr.async_get(hass)
+    log_data = await _async_load_log(hass)
+    billing = _billing_report(hass, await _async_load_billing(hass))
+    active_sessions = {session["switch_entity_id"]: session for session in billing["active"]}
+    settings = billing["settings"]
+
+    outlets = []
+    for state in hass.states.async_all("switch"):
+        entity_id = state.entity_id
+        entity_entry = entity_registry.async_get(entity_id)
+        if not _is_managed_switch(entity_id, entity_entry, state, entity_filter):
+            continue
+        device_id = getattr(entity_entry, "device_id", None) if entity_entry is not None else None
+        device_entry = device_registry.async_get(device_id) if device_id else None
+        area_entry = _area_for_entity(entity_entry, device_entry, area_registry)
+        floor_entry = _floor_for_area(area_entry, floor_registry)
+        labels = _label_entries(label_registry, list(getattr(entity_entry, "labels", []) or []))
+        power_entity_id, power_state = _best_device_sensor(hass, entity_registry, device_id, kind="power")
+        energy_entity_id, energy_state = _best_device_sensor(hass, entity_registry, device_id, kind="energy")
+        energy_kwh = _normalise_energy_kwh(energy_state)
+        active_session = active_sessions.get(entity_id)
+        reference = (
+            log_data.get("active_references", {}).get(entity_id)
+            or (active_session or {}).get("reference")
+            or ""
+        )
+        rate = float(settings.get("energy_rate", DEFAULT_ENERGY_RATE) or DEFAULT_ENERGY_RATE)
+        outlets.append(
+            {
+                "id": entity_id,
+                "name": _state_name(state, entity_id),
+                "state": state.state,
+                "reference": reference,
+                "area": _entry_name(area_entry) or "Unassigned",
+                "level": _entry_name(floor_entry) or _entry_name(area_entry) or "Unassigned",
+                "labels": [_entry_name(label) for label in labels if _entry_name(label)],
+                "power_entity_id": power_entity_id,
+                "power_w": _normalise_power_w(power_state),
+                "energy_entity_id": energy_entity_id,
+                "energy_kwh": energy_kwh,
+                "meter_cost": _session_cost(energy_kwh, rate),
+                "session": active_session,
+            }
+        )
+    return sorted(outlets, key=lambda outlet: outlet["name"])
+
+
+async def _public_summary(hass: HomeAssistant) -> dict[str, Any]:
+    """Return public portal summary data."""
+    outlets = await _public_outlet_data(hass)
+    settings = (await _async_load_billing(hass))["settings"]
+    currency = settings.get("currency", "AUD")
+    return {
+        "outlet_count": len(outlets),
+        "outlets_on": sum(1 for outlet in outlets if outlet["state"] == "on"),
+        "total_power_w": sum(float(outlet["power_w"] or 0) for outlet in outlets),
+        "total_energy_kwh": sum(float(outlet["energy_kwh"] or 0) for outlet in outlets),
+        "total_cost": sum(float(outlet["meter_cost"] or 0) for outlet in outlets),
+        "currency": currency,
+    }
+
+
+class ParkPowerPublicPortalView(HomeAssistantView):
+    """Serve the unauthenticated public ParkPower portal."""
+
+    url = "/parkpower-public"
+    name = "api:parkpower_public:portal"
+    requires_auth = False
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return the public portal HTML."""
+        return web.FileResponse(Path(__file__).parent / "frontend" / "public-portal.html")
+
+
+class ParkPowerPublicSettingsView(HomeAssistantView):
+    """Return public portal settings."""
+
+    url = "/api/parkpower-public/settings"
+    name = "api:parkpower_public:settings"
+    requires_auth = False
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return branding settings."""
+        hass = request.app["hass"]
+        options = _public_options(hass)
+        return web.json_response(
+            {
+                "name": options.get(CONF_PORTAL_NAME) or options.get(CONF_DASHBOARD_NAME, DEFAULT_DASHBOARD_NAME),
+                "logo_url": options.get(CONF_LOGO_URL, ""),
+                "accent": "#0f766e",
+            }
+        )
+
+
+class ParkPowerPublicSummaryView(HomeAssistantView):
+    """Return public portal summary."""
+
+    url = "/api/parkpower-public/summary"
+    name = "api:parkpower_public:summary"
+    requires_auth = False
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return summary data."""
+        return web.json_response(await _public_summary(request.app["hass"]))
+
+
+class ParkPowerPublicOutletsView(HomeAssistantView):
+    """Return public portal outlets."""
+
+    url = "/api/parkpower-public/outlets"
+    name = "api:parkpower_public:outlets"
+    requires_auth = False
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return outlet data."""
+        return web.json_response({"outlets": await _public_outlet_data(request.app["hass"])})
+
+
+class ParkPowerPublicControlView(HomeAssistantView):
+    """Control one outlet from the public portal."""
+
+    url = "/api/parkpower-public/outlets/{entity_id}/control"
+    name = "api:parkpower_public:control"
+    requires_auth = False
+
+    async def post(self, request: web.Request, entity_id: str) -> web.Response:
+        """Control one outlet."""
+        hass = request.app["hass"]
+        body = await request.json()
+        action = body.get("action")
+        if action not in {"turn_on", "turn_off"}:
+            return web.json_response({"error": "Invalid action"}, status=400)
+        reference = str(body.get("reference", "")).strip()
+        if action == "turn_on" and not reference:
+            return web.json_response({"error": "Reference is required before powering an outlet on"}, status=400)
+        outlet_name = str(body.get("outlet_name", "")).strip() or entity_id
+        try:
+            await hass.services.async_call("switch", action, {"entity_id": entity_id}, blocking=True)
+            event = await _async_log_outlet_event(
+                hass,
+                switch_entity_id=entity_id,
+                action=action,
+                reference=reference,
+                outlet_name=outlet_name,
+                success=True,
+            )
+            await _async_record_session_event(
+                hass,
+                switch_entity_id=entity_id,
+                action=action,
+                reference=reference,
+                outlet_name=outlet_name,
+                event=event,
+            )
+            return web.json_response({"event": event})
+        except Exception as err:  # noqa: BLE001 - surfaced to public UI
+            event = await _async_log_outlet_event(
+                hass,
+                switch_entity_id=entity_id,
+                action=action,
+                reference=reference,
+                outlet_name=outlet_name,
+                success=False,
+                error=str(err),
+            )
+            return web.json_response({"error": str(err), "event": event}, status=500)
+
+
+class ParkPowerPublicAllOffView(HomeAssistantView):
+    """Turn all public portal outlets off."""
+
+    url = "/api/parkpower-public/all-off"
+    name = "api:parkpower_public:all_off"
+    requires_auth = False
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Turn all supplied outlets off."""
+        hass = request.app["hass"]
+        body = await request.json()
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return web.json_response({"error": "At least one outlet is required"}, status=400)
+        reference = str(body.get("reference", "")).strip() or "Public portal ALL Off"
+        events = []
+        for entity_id in ids:
+            state = hass.states.get(entity_id)
+            outlet_name = _state_name(state, entity_id)
+            try:
+                await hass.services.async_call("switch", "turn_off", {"entity_id": entity_id}, blocking=True)
+                event = await _async_log_outlet_event(
+                    hass,
+                    switch_entity_id=entity_id,
+                    action="turn_off",
+                    reference=reference,
+                    outlet_name=outlet_name,
+                    success=True,
+                )
+                await _async_record_session_event(
+                    hass,
+                    switch_entity_id=entity_id,
+                    action="turn_off",
+                    reference=reference,
+                    outlet_name=outlet_name,
+                    event=event,
+                )
+                events.append(event)
+            except Exception as err:  # noqa: BLE001 - surfaced to public UI
+                events.append(
+                    await _async_log_outlet_event(
+                        hass,
+                        switch_entity_id=entity_id,
+                        action="turn_off",
+                        reference=reference,
+                        outlet_name=outlet_name,
+                        success=False,
+                        error=str(err),
+                    )
+                )
+        return web.json_response({"events": events})
 
 
 @websocket_api.websocket_command(
