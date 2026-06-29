@@ -10,7 +10,10 @@
           "url_path": "Sidebar URL path",
           "sidebar_icon": "Sidebar icon",
           "logo_url": "Logo URL",
-          "entity_filter": "Entity filter keywords"
+          "entity_filter": "Entity filter keywords",
+          "enable_customer_portal": "Enable customer charging portal",
+          "portal_name": "Customer portal name",
+          "portal_url_path": "Customer portal URL path"
         }
       }
     }
@@ -24,10 +27,12 @@
           "url_path": "Sidebar URL path",
           "sidebar_icon": "Sidebar icon",
           "logo_url": "Logo URL",
-          "entity_filter": "Entity filter keywords"
+          "entity_filter": "Entity filter keywords",
+          "enable_customer_portal": "Enable customer charging portal",
+          "portal_name": "Customer portal name",
+          "portal_url_path": "Customer portal URL path"
         }
       }
     }
   }
 }
-

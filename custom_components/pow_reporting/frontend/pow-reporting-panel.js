@@ -28,6 +28,21 @@ function formatEnergyKwh(value, unit) {
   return `${formatNumber(kwh, 2)} kWh`;
 }
 
+function formatCurrency(value, currency = "AUD") {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "--";
+  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(numeric);
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  return `${minutes}m ${String(secs).padStart(2, "0")}s`;
+}
+
 function csvEscape(value) {
   const text = String(value ?? "");
   if (!/[",\n]/.test(text)) return text;
@@ -57,8 +72,18 @@ class PowReportingPanel extends HTMLElement {
     this._allOffReference = "Master ALL Off";
     this._selectedEntity = "";
     this._period = "day";
+    this._billingPeriod = "day";
+    this._billingReport = { settings: { energy_rate: 0.32, currency: "AUD" }, active: [], completed: [], sessions: [] };
+    this._billingMessage = "";
+    this._portalQuery = "";
+    this._panelMode = "admin";
     this._chartRows = [];
     this._loadingStats = false;
+    this._renamePreview = [];
+    this._renameBusy = false;
+    this._renameMessage = "";
+    this._pendingRender = false;
+    this._renderTimer = undefined;
     this._settings = {
       name: "Power Reporting",
       logoUrl: "",
@@ -66,6 +91,7 @@ class PowReportingPanel extends HTMLElement {
       filter: "sonoff,pow,esphome",
     };
     this._activeTab = "dashboard";
+    this.shadowRoot.addEventListener("focusout", () => this._flushPendingRenderSoon());
   }
 
   set hass(hass) {
@@ -75,9 +101,10 @@ class PowReportingPanel extends HTMLElement {
       this._loadSettings();
       this._loadRegistries();
       this._loadOutletLog();
+      this._loadBillingReport();
     }
     this._computeEntities();
-    this._render();
+    this._requestRender();
   }
 
   set panel(panel) {
@@ -89,10 +116,44 @@ class PowReportingPanel extends HTMLElement {
       logoUrl: config.logo_url || this._settings.logoUrl,
       filter: config.entity_filter || this._settings.filter,
     };
+    this._panelMode = config.mode || "admin";
+    if (this._panelMode === "portal") {
+      this._activeTab = "portal";
+    }
   }
 
   connectedCallback() {
-    this._render();
+    this._requestRender({ force: true });
+  }
+
+  _isUserEditing() {
+    const active = this.shadowRoot?.activeElement;
+    return Boolean(active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName));
+  }
+
+  _flushPendingRenderSoon() {
+    if (!this._pendingRender) return;
+    window.setTimeout(() => {
+      if (this._pendingRender && !this._isUserEditing()) {
+        this._requestRender({ force: true });
+      }
+    }, 350);
+  }
+
+  _requestRender({ force = false } = {}) {
+    if (!force && this._isUserEditing()) {
+      this._pendingRender = true;
+      return;
+    }
+    window.clearTimeout(this._renderTimer);
+    this._renderTimer = window.setTimeout(() => {
+      if (!force && this._isUserEditing()) {
+        this._pendingRender = true;
+        return;
+      }
+      this._pendingRender = false;
+      this._render();
+    }, force ? 0 : 80);
   }
 
   _loadSettings() {
@@ -118,7 +179,7 @@ class PowReportingPanel extends HTMLElement {
       this._entityRegistry = new Map(entities.map((entity) => [entity.entity_id, entity]));
       this._devices = new Map(devices.map((device) => [device.id, device]));
       this._computeEntities();
-      this._render();
+      this._requestRender();
     } catch (err) {
       this._registryError = err?.message || "Unable to load registries";
     }
@@ -130,9 +191,25 @@ class PowReportingPanel extends HTMLElement {
       const data = await this._hass.callWS({ type: "pow_reporting/get_outlet_log" });
       this._auditLog = Array.isArray(data?.events) ? data.events : [];
       this._activeReferences = data?.active_references || {};
-      this._render();
+      this._requestRender();
     } catch (err) {
       this._auditError = err?.message || "Unable to load outlet audit log.";
+    }
+  }
+
+  async _loadBillingReport() {
+    if (!this._hass?.callWS) return;
+    try {
+      const data = await this._hass.callWS({ type: "pow_reporting/get_billing_report" });
+      this._billingReport = {
+        settings: { energy_rate: 0.32, currency: "AUD", ...(data?.settings || {}) },
+        active: Array.isArray(data?.active) ? data.active : [],
+        completed: Array.isArray(data?.completed) ? data.completed : [],
+        sessions: Array.isArray(data?.sessions) ? data.sessions : [],
+      };
+      this._requestRender();
+    } catch (err) {
+      this._billingMessage = err?.message || "Unable to load billing report.";
     }
   }
 
@@ -225,7 +302,7 @@ class PowReportingPanel extends HTMLElement {
     this._loadingStats = true;
     this._statsError = "";
     this._chartRows = [];
-    this._render();
+    this._requestRender({ force: true });
 
     const now = new Date();
     const start = this._periodStart(now);
@@ -249,7 +326,7 @@ class PowReportingPanel extends HTMLElement {
       this._statsError = err?.message || "Recorder statistics are unavailable for this entity.";
     } finally {
       this._loadingStats = false;
-      this._render();
+      this._requestRender();
     }
   }
 
@@ -315,13 +392,13 @@ class PowReportingPanel extends HTMLElement {
     if (action === "turn_on" && !reference) {
       referenceInput?.focus();
       this._notice = "Enter a name, bay, or booking reference before turning an outlet on.";
-      this._render();
+      this._requestRender({ force: true });
       return;
     }
 
     this._busySwitches.add(switchEntityId);
     this._notice = "";
-    this._render();
+    this._requestRender({ force: true });
     try {
       await this._hass.callWS({
         type: "pow_reporting/control_outlet",
@@ -331,11 +408,12 @@ class PowReportingPanel extends HTMLElement {
         outlet_name: outletName,
       });
       await this._loadOutletLog();
+      await this._loadBillingReport();
     } catch (err) {
       this._notice = err?.message || "Unable to control outlet.";
     } finally {
       this._busySwitches.delete(switchEntityId);
-      this._render();
+      this._requestRender();
     }
   }
 
@@ -347,7 +425,7 @@ class PowReportingPanel extends HTMLElement {
 
     this._allOffBusy = true;
     this._notice = "";
-    this._render();
+    this._requestRender({ force: true });
     try {
       await this._hass.callWS({
         type: "pow_reporting/all_off",
@@ -355,11 +433,129 @@ class PowReportingPanel extends HTMLElement {
         reference,
       });
       await this._loadOutletLog();
+      await this._loadBillingReport();
     } catch (err) {
       this._notice = err?.message || "Unable to run master all-off.";
     } finally {
       this._allOffBusy = false;
-      this._render();
+      this._requestRender();
+    }
+  }
+
+  async _saveBillingSettings() {
+    if (!this._hass?.callWS) return;
+    const rate = Number(this.shadowRoot.querySelector("#billing-rate")?.value);
+    const currency = this.shadowRoot.querySelector("#billing-currency")?.value.trim() || "AUD";
+    this._billingMessage = "";
+    this._requestRender({ force: true });
+    try {
+      const data = await this._hass.callWS({
+        type: "pow_reporting/save_billing_settings",
+        energy_rate: Number.isFinite(rate) ? rate : 0,
+        currency,
+      });
+      this._billingReport = {
+        settings: { energy_rate: 0.32, currency: "AUD", ...(data?.settings || {}) },
+        active: Array.isArray(data?.active) ? data.active : [],
+        completed: Array.isArray(data?.completed) ? data.completed : [],
+        sessions: Array.isArray(data?.sessions) ? data.sessions : [],
+      };
+      this._billingMessage = "Billing settings saved.";
+    } catch (err) {
+      this._billingMessage = err?.message || "Unable to save billing settings.";
+    } finally {
+      this._requestRender();
+    }
+  }
+
+  _billingPeriodStart(now = new Date()) {
+    if (this._billingPeriod === "week") {
+      const start = startOfLocalDay(now);
+      start.setDate(start.getDate() - 6);
+      return start;
+    }
+    if (this._billingPeriod === "month") {
+      return new Date(now.getFullYear(), now.getMonth(), 1);
+    }
+    if (this._billingPeriod === "all") {
+      return null;
+    }
+    return startOfLocalDay(now);
+  }
+
+  _filteredBillingSessions() {
+    const start = this._billingPeriodStart();
+    const sessions = this._billingReport.completed || [];
+    if (!start) return sessions;
+    return sessions.filter((session) => new Date(session.end_time || session.start_time) >= start);
+  }
+
+  _billingTotals(sessions = this._filteredBillingSessions()) {
+    return sessions.reduce(
+      (total, session) => {
+        total.sessions += 1;
+        total.duration += Number(session.duration_seconds) || 0;
+        total.energy += Number(session.energy_kwh) || 0;
+        total.cost += Number(session.cost) || 0;
+        return total;
+      },
+      { sessions: 0, duration: 0, energy: 0, cost: 0 },
+    );
+  }
+
+  _downloadBillingCsv() {
+    const rows = [
+      ["start", "end", "outlet", "switch_entity_id", "reference", "duration", "energy_kwh", "rate", "cost", "currency"],
+      ...this._filteredBillingSessions().map((session) => [
+        session.start_time,
+        session.end_time,
+        session.outlet_name,
+        session.switch_entity_id,
+        session.reference,
+        session.duration_seconds,
+        session.energy_kwh,
+        session.rate,
+        session.cost,
+        session.currency,
+      ]),
+    ];
+    const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `outlet-billing-${this._billingPeriod}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async _loadRenamePreview({ apply = false } = {}) {
+    if (!this._hass?.callWS) return;
+    if (apply) {
+      const changed = this._renamePreview.filter((item) => item.changed).length;
+      const confirmed = confirm(`Apply ${changed} Home Assistant entity name changes?`);
+      if (!confirmed) return;
+    }
+
+    this._renameBusy = true;
+    this._renameMessage = "";
+    this._requestRender({ force: true });
+    try {
+      const result = await this._hass.callWS({
+        type: "pow_reporting/auto_name_entities",
+        apply,
+        entity_filter: this._settings.filter,
+      });
+      this._renamePreview = result.entities || [];
+      this._renameMessage = apply
+        ? "Entity display names updated in Home Assistant."
+        : `${this._renamePreview.filter((item) => item.changed).length} proposed name changes found.`;
+      await this._loadRegistries();
+    } catch (err) {
+      this._renameMessage = err?.message || "Unable to build entity name preview.";
+    } finally {
+      this._renameBusy = false;
+      this._requestRender();
     }
   }
 
@@ -409,10 +605,11 @@ class PowReportingPanel extends HTMLElement {
     const totals = this._totals();
     const energyRows = this._entities.filter((row) => row.isEnergy);
     const powerRows = this._entities.filter((row) => row.isPower);
+    const isPortal = this._panelMode === "portal";
 
     this.shadowRoot.innerHTML = `
       <style>${this._styles()}</style>
-      <main style="--accent: ${this._settings.accent}">
+      <main class="${isPortal ? "portal-shell" : ""}" style="--accent: ${this._settings.accent}">
         <header>
           <div class="brand">
             ${this._settings.logoUrl ? `<img src="${htmlEscape(this._settings.logoUrl)}" alt="">` : `<div class="mark">P</div>`}
@@ -421,18 +618,19 @@ class PowReportingPanel extends HTMLElement {
               <p>${totals.outletsOn} of ${totals.outletCount} outlets on · ${this._entities.length} reporting entities</p>
             </div>
           </div>
-          <nav>
+          ${isPortal ? "" : `<nav>
             ${this._tabButton("dashboard", "Dashboard")}
             ${this._tabButton("outlets", "Outlets")}
             ${this._tabButton("reports", "Reports")}
             ${this._tabButton("settings", "Settings")}
-          </nav>
+          </nav>`}
         </header>
         ${this._notice ? `<p class="notice">${htmlEscape(this._notice)}</p>` : ""}
-        ${this._activeTab === "dashboard" ? this._dashboard(totals, powerRows, energyRows) : ""}
-        ${this._activeTab === "outlets" ? this._outletsView() : ""}
-        ${this._activeTab === "reports" ? this._reports() : ""}
-        ${this._activeTab === "settings" ? this._settingsView() : ""}
+        ${isPortal ? this._portalView(totals) : ""}
+        ${!isPortal && this._activeTab === "dashboard" ? this._dashboard(totals, powerRows, energyRows) : ""}
+        ${!isPortal && this._activeTab === "outlets" ? this._outletsView() : ""}
+        ${!isPortal && this._activeTab === "reports" ? this._reports() : ""}
+        ${!isPortal && this._activeTab === "settings" ? this._settingsView() : ""}
       </main>
     `;
 
@@ -457,6 +655,16 @@ class PowReportingPanel extends HTMLElement {
     this.shadowRoot.querySelector("#refresh-stats")?.addEventListener("click", () => this._loadStats());
     this.shadowRoot.querySelector("#download-csv")?.addEventListener("click", () => this._downloadCsv());
     this.shadowRoot.querySelector("#download-audit-csv")?.addEventListener("click", () => this._downloadAuditCsv());
+    this.shadowRoot.querySelector("#download-billing-csv")?.addEventListener("click", () => this._downloadBillingCsv());
+    this.shadowRoot.querySelector("#billing-period-select")?.addEventListener("change", (event) => {
+      this._billingPeriod = event.target.value;
+      this._render();
+    });
+    this.shadowRoot.querySelector("#save-billing-settings")?.addEventListener("click", () => this._saveBillingSettings());
+    this.shadowRoot.querySelector("#portal-search")?.addEventListener("input", (event) => {
+      this._portalQuery = event.target.value;
+      this._requestRender();
+    });
     this.shadowRoot.querySelector("#master-all-off")?.addEventListener("click", () => this._allOff());
     this.shadowRoot.querySelectorAll("[data-outlet-action]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -474,6 +682,8 @@ class PowReportingPanel extends HTMLElement {
       this._computeEntities();
       this._render();
     });
+    this.shadowRoot.querySelector("#preview-entity-names")?.addEventListener("click", () => this._loadRenamePreview());
+    this.shadowRoot.querySelector("#apply-entity-names")?.addEventListener("click", () => this._loadRenamePreview({ apply: true }));
   }
 
   _tabButton(tab, label) {
@@ -481,12 +691,14 @@ class PowReportingPanel extends HTMLElement {
   }
 
   _dashboard(totals, powerRows, energyRows) {
+    const billingTotals = this._billingTotals(this._filteredBillingSessions());
+    const currency = this._billingReport.settings?.currency || "AUD";
     return `
       <section class="summary-grid">
         <article><span>Live load</span><strong>${formatNumber(totals.powerWatts, 0)} W</strong></article>
         <article><span>Outlets on</span><strong>${totals.outletsOn} / ${totals.outletCount}</strong></article>
-        <article><span>Power sensors</span><strong>${totals.powerCount}</strong></article>
-        <article><span>Energy sensors</span><strong>${totals.energyCount}</strong></article>
+        <article><span>Billing energy</span><strong>${htmlEscape(formatEnergyKwh(billingTotals.energy, "kWh"))}</strong></article>
+        <article><span>Billing cost</span><strong>${htmlEscape(formatCurrency(billingTotals.cost, currency))}</strong></article>
       </section>
       ${this._registryError ? `<p class="notice">${this._registryError}</p>` : ""}
       <section class="columns">
@@ -499,6 +711,67 @@ class PowReportingPanel extends HTMLElement {
           <div class="table">${energyRows.map((row) => this._entityRow(row, formatEnergyKwh(row.entity.state, row.entity.attributes.unit_of_measurement))).join("") || `<div class="empty">No matching energy sensors found.</div>`}</div>
         </div>
       </section>
+    `;
+  }
+
+  _portalView(totals) {
+    const query = this._portalQuery.trim().toLowerCase();
+    const activeSessions = this._billingReport.active || [];
+    const filtered = this._outlets.filter((outlet) => {
+      const session = activeSessions.find((item) => item.switch_entity_id === outlet.entity.entity_id);
+      const text = [
+        outlet.name,
+        outlet.entity.entity_id,
+        outlet.device?.name_by_user,
+        outlet.device?.name,
+        session?.reference,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return !query || text.includes(query);
+    });
+    const billingTotals = this._billingTotals(this._filteredBillingSessions());
+    const currency = this._billingReport.settings?.currency || "AUD";
+    return `
+      <section class="portal-hero">
+        <div>
+          <span>EV outlet usage</span>
+          <h2>${totals.outletsOn} active charging bays</h2>
+          <p>${htmlEscape(formatPowerWatts({ state: totals.powerWatts, attributes: { unit_of_measurement: "W" } }))} live load · ${htmlEscape(formatCurrency(billingTotals.cost, currency))} billed in selected period</p>
+        </div>
+        <label>Find bay, outlet, or reference<input id="portal-search" value="${htmlEscape(this._portalQuery)}" placeholder="Bay 4, Smith, L2-B2"></label>
+      </section>
+      <section class="portal-grid">
+        ${filtered.map((outlet) => this._portalCard(outlet)).join("") || `<div class="empty">No matching charging bays found.</div>`}
+      </section>
+    `;
+  }
+
+  _portalCard(outlet) {
+    const switchEntityId = outlet.entity.entity_id;
+    const isOn = outlet.entity.state === "on";
+    const session = (this._billingReport.active || []).find((item) => item.switch_entity_id === switchEntityId);
+    const power = outlet.power ? formatPowerWatts(outlet.power.entity) : "--";
+    const energy = outlet.energy ? formatEnergyKwh(outlet.energy.entity.state, outlet.energy.entity.attributes.unit_of_measurement) : "--";
+    return `
+      <article class="portal-card ${isOn ? "is-on" : ""}">
+        <div class="charge-visual">
+          <span class="vehicle">EV</span>
+          <i></i>
+          <span class="charger">${isOn ? "ON" : "OFF"}</span>
+        </div>
+        <div class="outlet-top">
+          <div>
+            <h2>${htmlEscape(outlet.name)}</h2>
+            <p>${htmlEscape(session?.reference || outlet.device?.name_by_user || switchEntityId)}</p>
+          </div>
+          <span class="status">${isOn ? "Charging" : "Inactive"}</span>
+        </div>
+        <div class="meter-row">
+          <span><b>${htmlEscape(power)}</b><small>Live load</small></span>
+          <span><b>${htmlEscape(energy)}</b><small>Meter</small></span>
+          <span><b>${session ? htmlEscape(formatDuration(session.duration_seconds)) : "--"}</b><small>Charging for</small></span>
+          <span><b>${session ? htmlEscape(formatCurrency(session.cost, session.currency)) : "--"}</b><small>Session cost</small></span>
+        </div>
+      </article>
     `;
   }
 
@@ -545,6 +818,7 @@ class PowReportingPanel extends HTMLElement {
     const activeReference = this._activeReferences[switchEntityId] || "";
     const power = outlet.power ? formatPowerWatts(outlet.power.entity) : "--";
     const energy = outlet.energy ? formatEnergyKwh(outlet.energy.entity.state, outlet.energy.entity.attributes.unit_of_measurement) : "--";
+    const activeSession = (this._billingReport.active || []).find((session) => session.switch_entity_id === switchEntityId);
     const status = isOn ? "On" : "Off";
     return `
       <article class="outlet-card ${isOn ? "is-on" : ""}">
@@ -558,6 +832,8 @@ class PowReportingPanel extends HTMLElement {
         <div class="meter-row">
           <span><b>${htmlEscape(power)}</b><small>Live load</small></span>
           <span><b>${htmlEscape(energy)}</b><small>Energy</small></span>
+          <span><b>${activeSession ? htmlEscape(formatDuration(activeSession.duration_seconds)) : "--"}</b><small>Charging for</small></span>
+          <span><b>${activeSession ? htmlEscape(formatCurrency(activeSession.cost, activeSession.currency)) : "--"}</b><small>Session cost</small></span>
         </div>
         <label>Customer, bay, or booking reference
           <input data-reference-for="${htmlEscape(switchEntityId)}" value="${htmlEscape(activeReference)}" placeholder="Bay 14 - Smith">
@@ -600,6 +876,9 @@ class PowReportingPanel extends HTMLElement {
       .filter((row) => row.isEnergy || row.isPower)
       .map((row) => `<option value="${htmlEscape(row.entity.entity_id)}" ${row.entity.entity_id === this._selectedEntity ? "selected" : ""}>${htmlEscape(row.name)}</option>`)
       .join("");
+    const billingSessions = this._filteredBillingSessions();
+    const billingTotals = this._billingTotals(billingSessions);
+    const currency = this._billingReport.settings?.currency || "AUD";
     return `
       <section class="report-controls">
         <label>Entity<select id="entity-select">${options}</select></label>
@@ -617,10 +896,47 @@ class PowReportingPanel extends HTMLElement {
         ${this._statsError ? `<p class="notice">${this._statsError}</p>` : ""}
         ${!this._loadingStats && !this._statsError ? this._chartSvg() : ""}
       </section>
+      <section class="billing-card">
+        <div class="section-head">
+          <div>
+            <h2>Billing Sessions</h2>
+            <p>Stored inside Home Assistant by this HACS integration.</p>
+          </div>
+          <div class="billing-actions">
+            <label>Billing period<select id="billing-period-select">
+              <option value="day" ${this._billingPeriod === "day" ? "selected" : ""}>Today</option>
+              <option value="week" ${this._billingPeriod === "week" ? "selected" : ""}>Last 7 days</option>
+              <option value="month" ${this._billingPeriod === "month" ? "selected" : ""}>This month</option>
+              <option value="all" ${this._billingPeriod === "all" ? "selected" : ""}>All sessions</option>
+            </select></label>
+            <button id="download-billing-csv" ${billingSessions.length ? "" : "disabled"}>Billing CSV</button>
+          </div>
+        </div>
+        ${this._billingMessage ? `<p class="notice">${htmlEscape(this._billingMessage)}</p>` : ""}
+        <section class="billing-summary">
+          <article><span>Sessions</span><strong>${billingTotals.sessions}</strong></article>
+          <article><span>Duration</span><strong>${htmlEscape(formatDuration(billingTotals.duration))}</strong></article>
+          <article><span>Energy</span><strong>${htmlEscape(formatEnergyKwh(billingTotals.energy, "kWh"))}</strong></article>
+          <article><span>Cost</span><strong>${htmlEscape(formatCurrency(billingTotals.cost, currency))}</strong></article>
+        </section>
+        <div class="billing-table">
+          ${billingSessions.length ? [...billingSessions].reverse().slice(0, 120).map((session) => `
+            <div class="billing-row">
+              <span>${htmlEscape(new Date(session.start_time).toLocaleString())}</span>
+              <strong>${htmlEscape(session.outlet_name || session.switch_entity_id)}</strong>
+              <span>${htmlEscape(formatDuration(session.duration_seconds))}</span>
+              <b>${session.energy_kwh == null ? "--" : htmlEscape(formatEnergyKwh(session.energy_kwh, "kWh"))}</b>
+              <b>${htmlEscape(formatCurrency(session.cost, session.currency || currency))}</b>
+              <small>${htmlEscape(session.reference || "")}</small>
+            </div>
+          `).join("") : `<div class="empty">No completed billing sessions for this period yet.</div>`}
+        </div>
+      </section>
     `;
   }
 
   _settingsView() {
+    const changed = this._renamePreview.filter((item) => item.changed).length;
     return `
       <section class="settings">
         <label>Dashboard name<input id="setting-name" value="${htmlEscape(this._settings.name)}"></label>
@@ -628,6 +944,35 @@ class PowReportingPanel extends HTMLElement {
         <label>Accent color<input id="setting-accent" type="color" value="${htmlEscape(this._settings.accent)}"></label>
         <label>Entity filter keywords<input id="setting-filter" value="${htmlEscape(this._settings.filter)}" placeholder="sonoff,pow,esphome"></label>
         <button id="save-settings">Save</button>
+      </section>
+      <section class="settings">
+        <h2>Billing Settings</h2>
+        <label>Energy rate<input id="billing-rate" type="number" min="0" step="0.01" value="${htmlEscape(this._billingReport.settings?.energy_rate ?? 0.32)}"></label>
+        <label>Currency<input id="billing-currency" value="${htmlEscape(this._billingReport.settings?.currency || "AUD")}"></label>
+        <button id="save-billing-settings">Save Billing Settings</button>
+      </section>
+      <section class="rename-tool">
+        <div class="section-head">
+          <div>
+            <h2>Home Assistant Entity Naming</h2>
+            <p>Build names from Floor, Bay/Spot label, and entity type. Example: L1-B7 Control, L1-B7 Watts, L1-B7 Amps.</p>
+          </div>
+          <div class="rename-actions">
+            <button id="preview-entity-names" ${this._renameBusy ? "disabled" : ""}>Preview Names</button>
+            <button id="apply-entity-names" class="danger secondary" ${this._renameBusy || !changed ? "disabled" : ""}>Apply ${changed || ""}</button>
+          </div>
+        </div>
+        ${this._renameMessage ? `<p class="notice">${htmlEscape(this._renameMessage)}</p>` : ""}
+        <div class="rename-table">
+          ${this._renamePreview.length ? this._renamePreview.map((item) => `
+            <div class="rename-row ${item.changed ? "will-change" : ""}">
+              <span>${htmlEscape(item.entity_id)}</span>
+              <strong>${htmlEscape(item.current_name || "")}</strong>
+              <b>${htmlEscape(item.proposed_name)}</b>
+              <small>${htmlEscape([item.floor, item.area, ...(item.labels || [])].filter(Boolean).join(" · "))}</small>
+            </div>
+          `).join("") : `<div class="empty">Preview proposed entity names before applying changes.</div>`}
+        </div>
       </section>
     `;
   }
@@ -653,7 +998,7 @@ class PowReportingPanel extends HTMLElement {
       button:disabled { opacity: .45; cursor: default; }
       button:disabled:hover { background: #fff; color: #172026; }
       .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
-      article, .report-card, .settings, .table, .master-control, .audit-card { background: #fff; border: 1px solid #dde3e7; border-radius: 8px; }
+      article, .report-card, .settings, .table, .master-control, .audit-card, .rename-tool, .billing-card, .portal-hero, .portal-card { background: #fff; border: 1px solid #dde3e7; border-radius: 8px; }
       article { padding: 16px; }
       article span { display: block; color: #5d6972; font-size: 13px; margin-bottom: 8px; }
       article strong { display: block; font-size: 28px; line-height: 1; }
@@ -685,6 +1030,21 @@ class PowReportingPanel extends HTMLElement {
       .meter-row small { color: #5d6972; }
       .outlet-actions { display: flex; gap: 8px; }
       .outlet-actions button { flex: 1; }
+      .portal-shell { background: radial-gradient(circle at 12% 8%, color-mix(in srgb, var(--accent), transparent 78%), transparent 32%), linear-gradient(135deg, #081312, #12201f 52%, #0d1418); color: #e8f7f5; }
+      .portal-shell header { color: #e8f7f5; }
+      .portal-shell .brand p, .portal-shell p, .portal-shell small, .portal-shell label { color: #b9c9c8; }
+      .portal-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 380px); gap: 18px; align-items: end; padding: 22px; margin-bottom: 18px; color: #e8f7f5; background: linear-gradient(90deg, rgba(255,255,255,.1), rgba(255,255,255,.04)), repeating-linear-gradient(110deg, rgba(255,255,255,.05) 0 1px, transparent 1px 42px); border-color: rgba(255,255,255,.14); }
+      .portal-hero span { color: var(--accent); font-size: 13px; font-weight: 800; text-transform: uppercase; }
+      .portal-hero h2 { margin: 4px 0 8px; font-size: 34px; line-height: 1.05; }
+      .portal-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+      .portal-card { display: grid; gap: 14px; padding: 16px; color: #e8f7f5; background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.13); box-shadow: 0 18px 46px rgba(0,0,0,.18); }
+      .portal-card.is-on { border-color: color-mix(in srgb, var(--accent), white 15%); box-shadow: inset 4px 0 0 var(--accent), 0 0 34px color-mix(in srgb, var(--accent), transparent 78%); }
+      .portal-card .meter-row span { background: rgba(255,255,255,.08); }
+      .charge-visual { display: grid; grid-template-columns: auto minmax(60px, 1fr) auto; gap: 10px; align-items: center; color: var(--accent); }
+      .charge-visual span { display: grid; place-items: center; width: 48px; height: 36px; border-radius: 8px; background: color-mix(in srgb, var(--accent), transparent 82%); font-size: 12px; font-weight: 800; }
+      .charge-visual i { height: 5px; border-radius: 999px; background: linear-gradient(90deg, transparent, var(--accent), #67e8f9, transparent); background-size: 140px 100%; animation: chargeFlow 1.3s linear infinite; opacity: .75; }
+      .portal-card:not(.is-on) .charge-visual i { animation: none; background: rgba(255,255,255,.16); }
+      @keyframes chargeFlow { from { background-position: -140px 0; } to { background-position: 140px 0; } }
       .audit-card { padding: 16px; }
       .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
       .audit-table { overflow: hidden; border: 1px solid #edf0f2; border-radius: 8px; }
@@ -693,16 +1053,35 @@ class PowReportingPanel extends HTMLElement {
       .audit-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .event-on { color: #166534; }
       .event-off { color: #991b1b; }
+      .billing-card { padding: 16px; margin-top: 16px; }
+      .billing-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+      .billing-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
+      .billing-summary article { border-color: #edf0f2; box-shadow: none; }
+      .billing-summary strong { font-size: 22px; }
+      .billing-table { overflow: hidden; border: 1px solid #edf0f2; border-radius: 8px; }
+      .billing-row { display: grid; grid-template-columns: 170px minmax(150px, 1.1fr) 90px 100px 100px minmax(120px, 1fr); gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #edf0f2; }
+      .billing-row span, .billing-row strong, .billing-row b, .billing-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .billing-row span, .billing-row small { color: #5d6972; }
       .chart { display: block; width: 100%; height: 300px; background: linear-gradient(#edf1f3 1px, transparent 1px), linear-gradient(90deg, #edf1f3 1px, transparent 1px); background-size: 100% 25%, 12.5% 100%; border-radius: 8px; }
       .chart-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 12px; color: #5d6972; }
-      .settings { display: grid; gap: 14px; max-width: 560px; padding: 16px; }
+      .settings { display: grid; gap: 14px; max-width: 560px; padding: 16px; margin-bottom: 16px; }
       .settings label { color: #172026; }
+      .rename-tool { padding: 16px; }
+      .rename-tool p { margin-top: 4px; }
+      .rename-actions { display: flex; gap: 8px; align-items: center; }
+      .rename-table { overflow: hidden; border: 1px solid #edf0f2; border-radius: 8px; }
+      .rename-row { display: grid; grid-template-columns: minmax(190px, 1.1fr) minmax(160px, 1fr) minmax(160px, 1fr) minmax(140px, .9fr); gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #edf0f2; }
+      .rename-row.will-change { background: #f0fdf4; }
+      .rename-row span, .rename-row strong, .rename-row b, .rename-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .rename-row span, .rename-row small { color: #5d6972; }
+      .rename-row b { color: #166534; }
       @media (max-width: 760px) {
         main { padding: 14px; }
         header, .columns { grid-template-columns: 1fr; display: grid; }
+        .portal-hero { grid-template-columns: 1fr; }
         nav { overflow-x: auto; }
-        .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .master-control, .audit-row { grid-template-columns: 1fr; }
+        .summary-grid, .billing-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .master-control, .audit-row, .rename-row, .billing-row { grid-template-columns: 1fr; }
         .outlet-actions { display: grid; }
         select, input { min-width: 0; width: 100%; box-sizing: border-box; }
       }

@@ -2,3 +2,11 @@ __pycache__/
 *.py[cod]
 .DS_Store
 dist/
+node_modules/
+.env
+.env.local
+tmp/
+display/parking_power_panel/secrets*.h
+!display/parking_power_panel/secrets.h.example
+portal/data/
+portal/config/outlet-map.json

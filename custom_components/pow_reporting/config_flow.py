@@ -12,11 +12,16 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import (
     CONF_DASHBOARD_NAME,
     CONF_ENTITY_FILTER,
+    CONF_ENABLE_CUSTOMER_PORTAL,
     CONF_LOGO_URL,
+    CONF_PORTAL_NAME,
+    CONF_PORTAL_URL_PATH,
     CONF_SIDEBAR_ICON,
     CONF_URL_PATH,
     DEFAULT_DASHBOARD_NAME,
     DEFAULT_ENTITY_FILTER,
+    DEFAULT_PORTAL_NAME,
+    DEFAULT_PORTAL_URL_PATH,
     DEFAULT_SIDEBAR_ICON,
     DEFAULT_URL_PATH,
     DOMAIN,
@@ -46,6 +51,18 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_ENTITY_FILTER,
                 default=defaults.get(CONF_ENTITY_FILTER, DEFAULT_ENTITY_FILTER),
+            ): str,
+            vol.Optional(
+                CONF_ENABLE_CUSTOMER_PORTAL,
+                default=defaults.get(CONF_ENABLE_CUSTOMER_PORTAL, True),
+            ): bool,
+            vol.Optional(
+                CONF_PORTAL_NAME,
+                default=defaults.get(CONF_PORTAL_NAME, DEFAULT_PORTAL_NAME),
+            ): str,
+            vol.Optional(
+                CONF_PORTAL_URL_PATH,
+                default=defaults.get(CONF_PORTAL_URL_PATH, DEFAULT_PORTAL_URL_PATH),
             ): str,
         }
     )
@@ -102,4 +119,3 @@ class PowReportingOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=_schema(defaults),
         )
-
