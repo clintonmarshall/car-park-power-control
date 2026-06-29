@@ -275,8 +275,8 @@ class PowReportingPanel extends HTMLElement {
           .toLowerCase();
         const keywordMatch = keywords.length === 0 || keywords.some((keyword) => haystack.includes(keyword));
         const isControl = !/(restart|update|firmware|reboot)/.test(haystack);
-        const power = sensorRows.find((row) => row.isPower && row.registry.device_id === registry.device_id);
-        const energy = sensorRows.find((row) => row.isEnergy && row.registry.device_id === registry.device_id);
+        const power = this._bestSensorForDevice(sensorRows, registry.device_id, "power");
+        const energy = this._bestSensorForDevice(sensorRows, registry.device_id, "energy");
         return {
           entity,
           registry,
@@ -529,6 +529,89 @@ class PowReportingPanel extends HTMLElement {
     URL.revokeObjectURL(url);
   }
 
+  _energyKwhForRow(row) {
+    const value = Number(row?.entity?.state);
+    if (!Number.isFinite(value)) return null;
+    return row.entity.attributes.unit_of_measurement === "Wh" ? value / 1000 : value;
+  }
+
+  _aggregateMeterRows() {
+    const rate = Number(this._billingReport.settings?.energy_rate ?? 0.32);
+    const currency = this._billingReport.settings?.currency || "AUD";
+    const rows = this._outlets
+      .map((outlet) => {
+        const energyKwh = this._energyKwhForRow(outlet.energy);
+        if (!Number.isFinite(energyKwh)) return null;
+        return {
+          switchEntityId: outlet.entity.entity_id,
+          outletName: outlet.name,
+          energyEntityId: outlet.energy.entity.entity_id,
+          meterName: outlet.energy.name,
+          energyKwh,
+          cost: energyKwh * rate,
+          currency,
+        };
+      })
+      .filter(Boolean);
+    return {
+      rows,
+      energyKwh: rows.reduce((total, row) => total + row.energyKwh, 0),
+      cost: rows.reduce((total, row) => total + row.cost, 0),
+      currency,
+    };
+  }
+
+  _downloadAggregateCostCsv() {
+    const aggregate = this._aggregateMeterRows();
+    const rate = this._billingReport.settings?.energy_rate ?? 0.32;
+    const rows = [
+      ["outlet", "switch_entity_id", "energy_entity_id", "meter_name", "meter_energy_kwh", "rate", "cost", "currency"],
+      ...aggregate.rows.map((row) => [
+        row.outletName,
+        row.switchEntityId,
+        row.energyEntityId,
+        row.meterName,
+        row.energyKwh,
+        rate,
+        row.cost,
+        row.currency,
+      ]),
+      ["TOTAL", "", "", "", aggregate.energyKwh, rate, aggregate.cost, aggregate.currency],
+    ];
+    const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "aggregate-meter-cost.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  _bestSensorForDevice(sensorRows, deviceId, kind) {
+    const candidates = sensorRows.filter((row) => row.registry.device_id === deviceId && (kind === "energy" ? row.isEnergy : row.isPower));
+    if (!candidates.length) return undefined;
+    if (kind === "power") return candidates[0];
+    return [...candidates].sort((a, b) => this._energySensorScore(b) - this._energySensorScore(a))[0];
+  }
+
+  _energySensorScore(row) {
+    const text = [
+      row.entity.entity_id,
+      row.entity.attributes.friendly_name,
+      row.registry.original_name,
+      row.registry.name,
+    ].filter(Boolean).join(" ").toLowerCase();
+    let score = 0;
+    if (text.includes("total")) score += 30;
+    if (text.includes("cumulative")) score += 25;
+    if (text.includes("lifetime")) score += 25;
+    if (text.includes("import")) score += 10;
+    if (text.includes("daily")) score -= 25;
+    if (text.includes("today")) score -= 20;
+    return score;
+  }
+
   async _loadRenamePreview({ apply = false } = {}) {
     if (!this._hass?.callWS) return;
     if (apply) {
@@ -656,6 +739,7 @@ class PowReportingPanel extends HTMLElement {
     this.shadowRoot.querySelector("#download-csv")?.addEventListener("click", () => this._downloadCsv());
     this.shadowRoot.querySelector("#download-audit-csv")?.addEventListener("click", () => this._downloadAuditCsv());
     this.shadowRoot.querySelector("#download-billing-csv")?.addEventListener("click", () => this._downloadBillingCsv());
+    this.shadowRoot.querySelector("#download-aggregate-cost-csv")?.addEventListener("click", () => this._downloadAggregateCostCsv());
     this.shadowRoot.querySelector("#billing-period-select")?.addEventListener("change", (event) => {
       this._billingPeriod = event.target.value;
       this._render();
@@ -692,13 +776,16 @@ class PowReportingPanel extends HTMLElement {
 
   _dashboard(totals, powerRows, energyRows) {
     const billingTotals = this._billingTotals(this._filteredBillingSessions());
+    const aggregate = this._aggregateMeterRows();
     const currency = this._billingReport.settings?.currency || "AUD";
     return `
       <section class="summary-grid">
         <article><span>Live load</span><strong>${formatNumber(totals.powerWatts, 0)} W</strong></article>
         <article><span>Outlets on</span><strong>${totals.outletsOn} / ${totals.outletCount}</strong></article>
-        <article><span>Billing energy</span><strong>${htmlEscape(formatEnergyKwh(billingTotals.energy, "kWh"))}</strong></article>
-        <article><span>Billing cost</span><strong>${htmlEscape(formatCurrency(billingTotals.cost, currency))}</strong></article>
+        <article><span>Meter energy</span><strong>${htmlEscape(formatEnergyKwh(aggregate.energyKwh, "kWh"))}</strong></article>
+        <article><span>Meter cost</span><strong>${htmlEscape(formatCurrency(aggregate.cost, currency))}</strong></article>
+        <article><span>Session energy</span><strong>${htmlEscape(formatEnergyKwh(billingTotals.energy, "kWh"))}</strong></article>
+        <article><span>Session cost</span><strong>${htmlEscape(formatCurrency(billingTotals.cost, currency))}</strong></article>
       </section>
       ${this._registryError ? `<p class="notice">${this._registryError}</p>` : ""}
       <section class="columns">
@@ -728,14 +815,14 @@ class PowReportingPanel extends HTMLElement {
       ].filter(Boolean).join(" ").toLowerCase();
       return !query || text.includes(query);
     });
-    const billingTotals = this._billingTotals(this._filteredBillingSessions());
+    const aggregate = this._aggregateMeterRows();
     const currency = this._billingReport.settings?.currency || "AUD";
     return `
       <section class="portal-hero">
         <div>
           <span>EV outlet usage</span>
           <h2>${totals.outletsOn} active charging bays</h2>
-          <p>${htmlEscape(formatPowerWatts({ state: totals.powerWatts, attributes: { unit_of_measurement: "W" } }))} live load · ${htmlEscape(formatCurrency(billingTotals.cost, currency))} billed in selected period</p>
+          <p>${htmlEscape(formatPowerWatts({ state: totals.powerWatts, attributes: { unit_of_measurement: "W" } }))} live load · ${htmlEscape(formatCurrency(aggregate.cost, currency))} total metered cost</p>
         </div>
         <label>Find bay, outlet, or reference<input id="portal-search" value="${htmlEscape(this._portalQuery)}" placeholder="Bay 4, Smith, L2-B2"></label>
       </section>
@@ -878,6 +965,7 @@ class PowReportingPanel extends HTMLElement {
       .join("");
     const billingSessions = this._filteredBillingSessions();
     const billingTotals = this._billingTotals(billingSessions);
+    const aggregate = this._aggregateMeterRows();
     const currency = this._billingReport.settings?.currency || "AUD";
     return `
       <section class="report-controls">
@@ -895,6 +983,31 @@ class PowReportingPanel extends HTMLElement {
         ${this._loadingStats ? `<div class="empty">Loading statistics...</div>` : ""}
         ${this._statsError ? `<p class="notice">${this._statsError}</p>` : ""}
         ${!this._loadingStats && !this._statsError ? this._chartSvg() : ""}
+      </section>
+      <section class="billing-card">
+        <div class="section-head">
+          <div>
+            <h2>Aggregate Meter Cost</h2>
+            <p>Total cost from current outlet energy meter readings. This ignores charging session start/stop events.</p>
+          </div>
+          <button id="download-aggregate-cost-csv" ${aggregate.rows.length ? "" : "disabled"}>Meter Cost CSV</button>
+        </div>
+        <section class="billing-summary">
+          <article><span>Metered outlets</span><strong>${aggregate.rows.length}</strong></article>
+          <article><span>Total meter energy</span><strong>${htmlEscape(formatEnergyKwh(aggregate.energyKwh, "kWh"))}</strong></article>
+          <article><span>Rate</span><strong>${htmlEscape(formatCurrency(this._billingReport.settings?.energy_rate ?? 0.32, currency))}/kWh</strong></article>
+          <article><span>Total meter cost</span><strong>${htmlEscape(formatCurrency(aggregate.cost, currency))}</strong></article>
+        </section>
+        <div class="billing-table aggregate-table">
+          ${aggregate.rows.length ? [...aggregate.rows].sort((a, b) => b.cost - a.cost).map((row) => `
+            <div class="aggregate-row">
+              <strong>${htmlEscape(row.outletName)}</strong>
+              <span>${htmlEscape(row.energyEntityId)}</span>
+              <b>${htmlEscape(formatEnergyKwh(row.energyKwh, "kWh"))}</b>
+              <b>${htmlEscape(formatCurrency(row.cost, row.currency))}</b>
+            </div>
+          `).join("") : `<div class="empty">No energy meter entities were found for the managed outlets.</div>`}
+        </div>
       </section>
       <section class="billing-card">
         <div class="section-head">
@@ -1062,6 +1175,9 @@ class PowReportingPanel extends HTMLElement {
       .billing-row { display: grid; grid-template-columns: 170px minmax(150px, 1.1fr) 90px 100px 100px minmax(120px, 1fr); gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #edf0f2; }
       .billing-row span, .billing-row strong, .billing-row b, .billing-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .billing-row span, .billing-row small { color: #5d6972; }
+      .aggregate-row { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(190px, 1fr) 120px 120px; gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #edf0f2; }
+      .aggregate-row span, .aggregate-row strong, .aggregate-row b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .aggregate-row span { color: #5d6972; }
       .chart { display: block; width: 100%; height: 300px; background: linear-gradient(#edf1f3 1px, transparent 1px), linear-gradient(90deg, #edf1f3 1px, transparent 1px); background-size: 100% 25%, 12.5% 100%; border-radius: 8px; }
       .chart-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 12px; color: #5d6972; }
       .settings { display: grid; gap: 14px; max-width: 560px; padding: 16px; margin-bottom: 16px; }
@@ -1081,7 +1197,7 @@ class PowReportingPanel extends HTMLElement {
         .portal-hero { grid-template-columns: 1fr; }
         nav { overflow-x: auto; }
         .summary-grid, .billing-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .master-control, .audit-row, .rename-row, .billing-row { grid-template-columns: 1fr; }
+        .master-control, .audit-row, .rename-row, .billing-row, .aggregate-row { grid-template-columns: 1fr; }
         .outlet-actions { display: grid; }
         select, input { min-width: 0; width: 100%; box-sizing: border-box; }
       }
