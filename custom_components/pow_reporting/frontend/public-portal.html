@@ -19,10 +19,12 @@
       button, input { font: inherit; }
       button { border: 0; border-radius: 7px; padding: 10px 12px; background: var(--accent); color: white; font-weight: 750; cursor: pointer; }
       button.secondary { background: rgba(255,255,255,.12); }
+      button.active { background: white; color: #102321; }
       button.danger { background: var(--danger); }
       button:disabled { opacity: .45; cursor: default; }
-      input { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 10px 11px; color: var(--text); background: rgba(255,255,255,.08); }
-      .hero, .card, .toolbar { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 18px 46px rgba(0,0,0,.18); }
+      input, select { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 10px 11px; color: var(--text); background: rgba(255,255,255,.08); }
+      option { color: #102321; }
+      .hero, .card, .toolbar, .billing-panel { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 18px 46px rgba(0,0,0,.18); }
       .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, 360px); gap: 18px; padding: 20px; margin-bottom: 16px; align-items: end; }
       .hero span { color: var(--accent); font-size: 13px; font-weight: 800; text-transform: uppercase; }
       .hero h2 { font-size: 36px; line-height: 1.05; margin: 4px 0 8px; }
@@ -31,6 +33,7 @@
       .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
       .metric strong { display: block; font-size: 24px; line-height: 1; }
       .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 340px) auto; gap: 12px; align-items: end; padding: 15px; margin-bottom: 16px; }
+      .tabs { display: flex; gap: 6px; padding: 4px; border-radius: 8px; background: rgba(255,255,255,.1); }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; }
       .card { display: grid; gap: 14px; padding: 16px; }
       .card.on { border-color: color-mix(in srgb, var(--accent), white 15%); box-shadow: inset 4px 0 0 var(--accent), 0 0 34px color-mix(in srgb, var(--accent), transparent 78%); }
@@ -47,12 +50,19 @@
       .meters div { display: grid; gap: 4px; padding: 10px; border-radius: 7px; background: rgba(255,255,255,.08); }
       .meters b { font-size: 18px; }
       .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .billing-panel { padding: 16px; }
+      .billing-head { display: flex; justify-content: space-between; gap: 12px; align-items: end; margin-bottom: 14px; }
+      .billing-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+      .billing-table { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
+      .billing-row { display: grid; grid-template-columns: 170px minmax(150px, 1.1fr) 90px 110px 110px minmax(120px, 1fr); gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+      .billing-row span, .billing-row strong, .billing-row b, .billing-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .notice { margin-bottom: 14px; padding: 14px 16px; border: 1px solid rgba(251,191,36,.45); border-radius: 8px; background: rgba(251,191,36,.14); color: #fde68a; }
       @media (max-width: 760px) {
         main { padding: 14px; }
-        header, .hero, .toolbar { grid-template-columns: 1fr; display: grid; }
+        header, .hero, .toolbar, .billing-head { grid-template-columns: 1fr; display: grid; }
         .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .actions { grid-template-columns: 1fr; }
+        .billing-row { grid-template-columns: 1fr; }
       }
     </style>
   </head>
@@ -80,13 +90,19 @@
         const m = Math.floor((total % 3600) / 60);
         return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(total % 60).padStart(2, "0")}s`;
       };
-      const state = { settings: {}, summary: {}, outlets: [], query: "", busy: new Set(), notice: "" };
+      const state = { settings: {}, summary: {}, outlets: [], billing: {}, query: "", view: "dashboard", billingPeriod: "day", busy: new Set(), notice: "" };
       async function load() {
         try {
-          const [settings, summary, outletData] = await Promise.all([api("/settings"), api("/summary"), api("/outlets")]);
+          const [settings, summary, outletData, billing] = await Promise.all([
+            api("/settings"),
+            api("/summary"),
+            api("/outlets"),
+            api(`/billing?period=${encodeURIComponent(state.billingPeriod)}`),
+          ]);
           state.settings = settings;
           state.summary = summary;
           state.outlets = outletData.outlets || [];
+          state.billing = billing;
           document.documentElement.style.setProperty("--accent", settings.accent || "#0f766e");
           render();
         } catch (err) {
@@ -127,6 +143,35 @@
           render();
         }
       }
+      function csvEscape(value) {
+        const text = String(value ?? "");
+        return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+      }
+      function downloadBillingCsv() {
+        const sessions = state.billing.completed || [];
+        const rows = [
+          ["start", "end", "outlet", "switch_entity_id", "reference", "duration_seconds", "energy_kwh", "rate", "cost", "currency"],
+          ...sessions.map((session) => [
+            session.start_time,
+            session.end_time,
+            session.outlet_name,
+            session.switch_entity_id,
+            session.reference,
+            session.duration_seconds,
+            session.energy_kwh,
+            session.rate,
+            session.cost,
+            session.currency,
+          ]),
+        ];
+        const blob = new Blob([rows.map((row) => row.map(csvEscape).join(",")).join("\n")], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `parkpower-public-billing-${state.billingPeriod}.csv`;
+        link.click();
+        URL.revokeObjectURL(url);
+      }
       function render() {
         const query = state.query.toLowerCase();
         const filtered = state.outlets.filter((outlet) => !query || [outlet.name, outlet.id, outlet.area, outlet.level, outlet.reference].filter(Boolean).join(" ").toLowerCase().includes(query));
@@ -137,9 +182,30 @@
               ${state.settings.logo_url ? `<img src="${esc(state.settings.logo_url)}" alt="">` : `<div class="mark">P</div>`}
               <div><h1>${esc(state.settings.name || "ParkPower Portal")}</h1><p>Public portal served by Home Assistant</p></div>
             </div>
-            <button class="secondary" id="refresh">Refresh</button>
+            <div class="tabs">
+              <button class="${state.view === "dashboard" ? "active" : "secondary"}" data-view="dashboard">Dashboard</button>
+              <button class="${state.view === "billing" ? "active" : "secondary"}" data-view="billing">Billing</button>
+              <button class="secondary" id="refresh">Refresh</button>
+            </div>
           </header>
           ${state.notice ? `<div class="notice">${esc(state.notice)}</div>` : ""}
+          ${state.view === "dashboard" ? dashboardView(filtered) : billingView()}
+        `;
+        document.querySelector("#refresh")?.addEventListener("click", load);
+        document.querySelectorAll("[data-view]").forEach((button) => {
+          button.addEventListener("click", () => { state.view = button.dataset.view; render(); });
+        });
+        document.querySelector("#query")?.addEventListener("input", (event) => { state.query = event.target.value; render(); });
+        document.querySelector("#allOff")?.addEventListener("click", allOff);
+        document.querySelector("#billingPeriod")?.addEventListener("change", async (event) => { state.billingPeriod = event.target.value; await load(); });
+        document.querySelector("#billingCsv")?.addEventListener("click", downloadBillingCsv);
+        document.querySelectorAll("[data-action]").forEach((button) => {
+          const outlet = state.outlets.find((item) => item.id === button.dataset.id);
+          button.addEventListener("click", () => control(outlet, button.dataset.action));
+        });
+      }
+      function dashboardView(filtered) {
+        return `
           <section class="hero">
             <div><span>EV outlet usage</span><h2>${state.summary.outlets_on || 0} active charging bays</h2><p>${number(state.summary.total_power_w, 0)} W live load · ${money(state.summary.total_cost, state.summary.currency)} total metered cost</p></div>
             <label>Find bay, outlet, or reference<input id="query" value="${esc(state.query)}" placeholder="Bay 4, Smith, L2-B2"></label>
@@ -157,13 +223,55 @@
           </section>
           <section class="grid">${filtered.map(card).join("") || `<div class="notice">No matching outlets found.</div>`}</section>
         `;
-        document.querySelector("#refresh")?.addEventListener("click", load);
-        document.querySelector("#query")?.addEventListener("input", (event) => { state.query = event.target.value; render(); });
-        document.querySelector("#allOff")?.addEventListener("click", allOff);
-        document.querySelectorAll("[data-action]").forEach((button) => {
-          const outlet = state.outlets.find((item) => item.id === button.dataset.id);
-          button.addEventListener("click", () => control(outlet, button.dataset.action));
-        });
+      }
+      function billingView() {
+        const billing = state.billing || {};
+        const settings = billing.settings || {};
+        const active = billing.active || [];
+        const completed = billing.completed || [];
+        const sessionTotals = billing.session_totals || {};
+        const activeTotals = billing.active_totals || {};
+        const meterTotals = billing.meter_totals || {};
+        const currency = settings.currency || meterTotals.currency || "AUD";
+        return `
+          <section class="hero">
+            <div><span>Public billing</span><h2>${money((sessionTotals.cost || 0) + (activeTotals.cost || 0), currency)} session cost</h2><p>${number((sessionTotals.energy_kwh || 0) + (activeTotals.energy_kwh || 0), 3)} kWh session energy · ${money(meterTotals.cost, currency)} total metered cost</p></div>
+            <div class="billing-actions">
+              <label>Period<select id="billingPeriod">
+                <option value="day" ${state.billingPeriod === "day" ? "selected" : ""}>Today</option>
+                <option value="week" ${state.billingPeriod === "week" ? "selected" : ""}>Last 7 days</option>
+                <option value="month" ${state.billingPeriod === "month" ? "selected" : ""}>This month</option>
+                <option value="all" ${state.billingPeriod === "all" ? "selected" : ""}>All sessions</option>
+              </select></label>
+              <button id="billingCsv" class="secondary" ${completed.length ? "" : "disabled"}>CSV</button>
+            </div>
+          </section>
+          <section class="metrics">
+            <div class="metric"><span>Completed sessions</span><strong>${sessionTotals.sessions || 0}</strong></div>
+            <div class="metric"><span>Completed energy</span><strong>${number(sessionTotals.energy_kwh, 3)} kWh</strong></div>
+            <div class="metric"><span>Completed cost</span><strong>${money(sessionTotals.cost, currency)}</strong></div>
+            <div class="metric"><span>Active cost</span><strong>${money(activeTotals.cost, currency)}</strong></div>
+          </section>
+          <section class="billing-panel">
+            <div class="billing-head"><div><h2>Active Sessions</h2><p>Live cost for outlets that are currently on.</p></div></div>
+            <div class="billing-table">${active.length ? active.map(sessionRow).join("") : `<div class="notice">No active billing sessions.</div>`}</div>
+          </section>
+          <section class="billing-panel" style="margin-top: 16px">
+            <div class="billing-head"><div><h2>Completed Sessions</h2><p>Stored billing sessions for the selected period.</p></div></div>
+            <div class="billing-table">${completed.length ? [...completed].reverse().slice(0, 120).map(sessionRow).join("") : `<div class="notice">No completed billing sessions for this period.</div>`}</div>
+          </section>
+        `;
+      }
+      function sessionRow(session) {
+        const time = new Date(session.end_time || session.start_time).toLocaleString();
+        return `<div class="billing-row">
+          <span>${esc(time)}</span>
+          <strong>${esc(session.outlet_name || session.switch_entity_id)}</strong>
+          <span>${duration(session.duration_seconds)}</span>
+          <b>${session.energy_kwh == null ? "--" : `${number(session.energy_kwh, 3)} kWh`}</b>
+          <b>${money(session.cost, session.currency || state.billing?.settings?.currency)}</b>
+          <small>${esc(session.reference || "")}</small>
+        </div>`;
       }
       function card(outlet) {
         const on = outlet.state === "on";

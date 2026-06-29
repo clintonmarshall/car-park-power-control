@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +124,7 @@ def _async_register_public_http(
     hass.http.register_view(ParkPowerPublicSettingsView())
     hass.http.register_view(ParkPowerPublicSummaryView())
     hass.http.register_view(ParkPowerPublicOutletsView())
+    hass.http.register_view(ParkPowerPublicBillingView())
     hass.http.register_view(ParkPowerPublicControlView())
     hass.http.register_view(ParkPowerPublicAllOffView())
     data["public_http_registered"] = True
@@ -594,6 +595,59 @@ async def _public_summary(hass: HomeAssistant) -> dict[str, Any]:
     }
 
 
+def _session_period_start(period: str) -> datetime | None:
+    """Return the local period start for a public billing report."""
+    now = datetime.now().astimezone()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "week":
+        return start - timedelta(days=6)
+    if period == "month":
+        return start.replace(day=1)
+    if period == "all":
+        return None
+    return start
+
+
+async def _public_billing_report(hass: HomeAssistant, period: str) -> dict[str, Any]:
+    """Return unauthenticated public billing report data."""
+    report = _billing_report(hass, await _async_load_billing(hass))
+    start = _session_period_start(period)
+    completed = report["completed"]
+    if start is not None:
+        completed = [
+            session
+            for session in completed
+            if datetime.fromisoformat(session.get("end_time") or session.get("start_time")) >= start
+        ]
+    session_totals = {
+        "sessions": len(completed),
+        "duration_seconds": sum(int(session.get("duration_seconds") or 0) for session in completed),
+        "energy_kwh": round(sum(float(session.get("energy_kwh") or 0) for session in completed), 4),
+        "cost": round(sum(float(session.get("cost") or 0) for session in completed), 4),
+    }
+    active_totals = {
+        "sessions": len(report["active"]),
+        "duration_seconds": sum(int(session.get("duration_seconds") or 0) for session in report["active"]),
+        "energy_kwh": round(sum(float(session.get("energy_kwh") or 0) for session in report["active"]), 4),
+        "cost": round(sum(float(session.get("cost") or 0) for session in report["active"]), 4),
+    }
+    meter_summary = await _public_summary(hass)
+    return {
+        "settings": report["settings"],
+        "period": period,
+        "active": report["active"],
+        "completed": completed,
+        "session_totals": session_totals,
+        "active_totals": active_totals,
+        "meter_totals": {
+            "outlets": meter_summary["outlet_count"],
+            "energy_kwh": round(meter_summary["total_energy_kwh"], 4),
+            "cost": round(meter_summary["total_cost"], 4),
+            "currency": meter_summary["currency"],
+        },
+    }
+
+
 class ParkPowerPublicPortalView(HomeAssistantView):
     """Serve the unauthenticated public ParkPower portal."""
 
@@ -648,6 +702,21 @@ class ParkPowerPublicOutletsView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         """Return outlet data."""
         return web.json_response({"outlets": await _public_outlet_data(request.app["hass"])})
+
+
+class ParkPowerPublicBillingView(HomeAssistantView):
+    """Return public portal billing data."""
+
+    url = "/api/parkpower-public/billing"
+    name = "api:parkpower_public:billing"
+    requires_auth = False
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return public billing data."""
+        period = request.query.get("period", "day")
+        if period not in {"day", "week", "month", "all"}:
+            period = "day"
+        return web.json_response(await _public_billing_report(request.app["hass"], period))
 
 
 class ParkPowerPublicControlView(HomeAssistantView):
