@@ -22,15 +22,23 @@ from homeassistant.helpers.storage import Store
 import homeassistant.helpers.config_validation as cv
 
 from .const import (
+    CONF_CHARGING_START_DELAY_SECONDS,
+    CONF_CHARGING_START_WATTS,
     CONF_DASHBOARD_NAME,
     CONF_ENTITY_FILTER,
     CONF_ENABLE_CUSTOMER_PORTAL,
     CONF_LOGO_URL,
+    CONF_MAXIMUM_SESSION_HOURS,
+    CONF_METER_STALE_MINUTES,
+    CONF_OFFLINE_TIMEOUT_MINUTES,
     CONF_PORTAL_NAME,
     CONF_PORTAL_URL_PATH,
     CONF_PUBLIC_PORT,
     CONF_SIDEBAR_ICON,
+    CONF_CHARGING_STOP_DELAY_MINUTES,
+    CONF_CHARGING_STOP_WATTS,
     CONF_URL_PATH,
+    DEFAULT_SESSION_THRESHOLDS,
     DEFAULT_DASHBOARD_NAME,
     DEFAULT_ENTITY_FILTER,
     DEFAULT_PORTAL_NAME,
@@ -40,6 +48,12 @@ from .const import (
     DEFAULT_URL_PATH,
     DOMAIN,
     PANEL_JS_URL,
+)
+from .coordinator import PowReportingCoordinator
+from .websocket import (
+    async_load_session_manager,
+    async_register_websocket_commands as async_register_session_websocket_commands,
+    async_save_session_manager,
 )
 
 PLATFORMS: list[Platform] = []
@@ -66,6 +80,34 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional(CONF_PORTAL_NAME, default=DEFAULT_PORTAL_NAME): cv.string,
                 vol.Optional(CONF_PORTAL_URL_PATH, default=DEFAULT_PORTAL_URL_PATH): cv.string,
                 vol.Optional(CONF_PUBLIC_PORT, default=DEFAULT_PUBLIC_PORT): cv.port,
+                vol.Optional(
+                    CONF_CHARGING_START_WATTS,
+                    default=DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_START_WATTS],
+                ): vol.Coerce(float),
+                vol.Optional(
+                    CONF_CHARGING_START_DELAY_SECONDS,
+                    default=DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_START_DELAY_SECONDS],
+                ): cv.positive_int,
+                vol.Optional(
+                    CONF_CHARGING_STOP_WATTS,
+                    default=DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_STOP_WATTS],
+                ): vol.Coerce(float),
+                vol.Optional(
+                    CONF_CHARGING_STOP_DELAY_MINUTES,
+                    default=DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_STOP_DELAY_MINUTES],
+                ): cv.positive_int,
+                vol.Optional(
+                    CONF_MAXIMUM_SESSION_HOURS,
+                    default=DEFAULT_SESSION_THRESHOLDS[CONF_MAXIMUM_SESSION_HOURS],
+                ): cv.positive_int,
+                vol.Optional(
+                    CONF_METER_STALE_MINUTES,
+                    default=DEFAULT_SESSION_THRESHOLDS[CONF_METER_STALE_MINUTES],
+                ): cv.positive_int,
+                vol.Optional(
+                    CONF_OFFLINE_TIMEOUT_MINUTES,
+                    default=DEFAULT_SESSION_THRESHOLDS[CONF_OFFLINE_TIMEOUT_MINUTES],
+                ): cv.positive_int,
             }
         )
     },
@@ -84,6 +126,8 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
     await _async_register_public_http(hass, yaml_config)
     await _async_register_dashboard(hass, yaml_config)
+    await _async_sync_session_thresholds(hass, yaml_config)
+    await _async_start_coordinator(hass, yaml_config)
     return True
 
 
@@ -94,6 +138,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     options = {**entry.data, **entry.options}
     await _async_register_public_http(hass, options)
     await _async_register_dashboard(hass, options)
+    await _async_sync_session_thresholds(hass, options)
+    await _async_start_coordinator(hass, options)
 
     entry.async_on_unload(
         entry.add_update_listener(_async_update_listener)
@@ -110,6 +156,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             options.get(CONF_PORTAL_URL_PATH, DEFAULT_PORTAL_URL_PATH),
         )
     )
+    entry.async_on_unload(lambda: _async_stop_coordinator(hass))
     return True
 
 
@@ -189,15 +236,7 @@ async def _async_register_dashboard(
     logo_url = options.get(CONF_LOGO_URL, "")
 
     panel_path = Path(__file__).parent / "frontend" / "pow-reporting-panel.js"
-    await hass.http.async_register_static_paths(
-        [
-            StaticPathConfig(
-                PANEL_JS_URL,
-                str(panel_path),
-                cache_headers=False,
-            )
-        ]
-    )
+    await _async_register_static_path_once(hass, panel_path)
 
     await panel_custom.async_register_panel(
         hass,
@@ -246,7 +285,32 @@ def _async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _websocket_control_outlet)
     websocket_api.async_register_command(hass, _websocket_all_off)
     websocket_api.async_register_command(hass, _websocket_auto_name_entities)
+    async_register_session_websocket_commands(hass)
     hass.data[DOMAIN]["websocket_registered"] = True
+
+
+async def _async_register_static_path_once(
+    hass: HomeAssistant,
+    panel_path: Path,
+) -> None:
+    """Register static frontend assets once per Home Assistant runtime."""
+    data = hass.data.setdefault(DOMAIN, {})
+    if data.get("static_path_registered"):
+        return
+    try:
+        await hass.http.async_register_static_paths(
+            [
+                StaticPathConfig(
+                    PANEL_JS_URL,
+                    str(panel_path),
+                    cache_headers=False,
+                )
+            ]
+        )
+    except RuntimeError as err:
+        if "already registered" not in str(err):
+            raise
+    data["static_path_registered"] = True
 
 
 async def _async_load_log(hass: HomeAssistant) -> dict[str, Any]:
@@ -442,6 +506,21 @@ async def _async_record_session_event(
             )
 
     await _async_save_billing(hass, data)
+    manager = await async_load_session_manager(hass)
+    if action == "turn_on":
+        manager.start_session(
+            outlet_entity_id=switch_entity_id,
+            outlet_display_name=outlet_name,
+            customer_reference=reference,
+            start_meter_reading=energy_kwh,
+        )
+    elif action == "turn_off":
+        manager.complete_session(
+            outlet_entity_id=switch_entity_id,
+            reason=reference or "Relay switched off",
+            end_meter_reading=energy_kwh,
+        )
+    await async_save_session_manager(hass, manager)
 
 
 def _billing_report(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
@@ -1357,10 +1436,43 @@ async def _websocket_auto_name_entities(
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the dashboard panel."""
     options = {**entry.data, **entry.options}
+    _async_stop_coordinator(hass)
     frontend.async_remove_panel(hass, options.get(CONF_URL_PATH, DEFAULT_URL_PATH))
     frontend.async_remove_panel(hass, options.get(CONF_PORTAL_URL_PATH, DEFAULT_PORTAL_URL_PATH))
     await _async_stop_public_portal_server(hass)
     return True
+
+
+async def _async_sync_session_thresholds(
+    hass: HomeAssistant,
+    options: dict[str, Any],
+) -> None:
+    """Persist configured session thresholds into the session store."""
+    threshold_keys = set(DEFAULT_SESSION_THRESHOLDS)
+    incoming = {key: options[key] for key in threshold_keys if key in options}
+    if not incoming:
+        return
+    manager = await async_load_session_manager(hass)
+    manager.thresholds.update(incoming)
+    await async_save_session_manager(hass, manager)
+
+
+async def _async_start_coordinator(
+    hass: HomeAssistant,
+    options: dict[str, Any],
+) -> None:
+    """Start the live entity coordinator."""
+    _async_stop_coordinator(hass)
+    coordinator = PowReportingCoordinator(hass, options)
+    hass.data.setdefault(DOMAIN, {})["coordinator"] = coordinator
+    await coordinator.async_start()
+
+
+def _async_stop_coordinator(hass: HomeAssistant) -> None:
+    """Stop the live entity coordinator if it is running."""
+    coordinator = hass.data.setdefault(DOMAIN, {}).pop("coordinator", None)
+    if coordinator is not None:
+        coordinator.async_stop()
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

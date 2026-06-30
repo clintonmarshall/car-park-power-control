@@ -10,10 +10,17 @@ from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
+    CONF_CHARGING_START_DELAY_SECONDS,
+    CONF_CHARGING_START_WATTS,
+    CONF_CHARGING_STOP_DELAY_MINUTES,
+    CONF_CHARGING_STOP_WATTS,
     CONF_DASHBOARD_NAME,
     CONF_ENTITY_FILTER,
     CONF_ENABLE_CUSTOMER_PORTAL,
     CONF_LOGO_URL,
+    CONF_MAXIMUM_SESSION_HOURS,
+    CONF_METER_STALE_MINUTES,
+    CONF_OFFLINE_TIMEOUT_MINUTES,
     CONF_PORTAL_NAME,
     CONF_PORTAL_URL_PATH,
     CONF_PUBLIC_PORT,
@@ -24,6 +31,7 @@ from .const import (
     DEFAULT_PORTAL_NAME,
     DEFAULT_PORTAL_URL_PATH,
     DEFAULT_PUBLIC_PORT,
+    DEFAULT_SESSION_THRESHOLDS,
     DEFAULT_SIDEBAR_ICON,
     DEFAULT_URL_PATH,
     DOMAIN,
@@ -69,6 +77,55 @@ def _schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_PUBLIC_PORT,
                 default=defaults.get(CONF_PUBLIC_PORT, DEFAULT_PUBLIC_PORT),
+            ): int,
+            vol.Optional(
+                CONF_CHARGING_START_WATTS,
+                default=defaults.get(
+                    CONF_CHARGING_START_WATTS,
+                    DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_START_WATTS],
+                ),
+            ): vol.Coerce(float),
+            vol.Optional(
+                CONF_CHARGING_START_DELAY_SECONDS,
+                default=defaults.get(
+                    CONF_CHARGING_START_DELAY_SECONDS,
+                    DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_START_DELAY_SECONDS],
+                ),
+            ): int,
+            vol.Optional(
+                CONF_CHARGING_STOP_WATTS,
+                default=defaults.get(
+                    CONF_CHARGING_STOP_WATTS,
+                    DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_STOP_WATTS],
+                ),
+            ): vol.Coerce(float),
+            vol.Optional(
+                CONF_CHARGING_STOP_DELAY_MINUTES,
+                default=defaults.get(
+                    CONF_CHARGING_STOP_DELAY_MINUTES,
+                    DEFAULT_SESSION_THRESHOLDS[CONF_CHARGING_STOP_DELAY_MINUTES],
+                ),
+            ): int,
+            vol.Optional(
+                CONF_MAXIMUM_SESSION_HOURS,
+                default=defaults.get(
+                    CONF_MAXIMUM_SESSION_HOURS,
+                    DEFAULT_SESSION_THRESHOLDS[CONF_MAXIMUM_SESSION_HOURS],
+                ),
+            ): int,
+            vol.Optional(
+                CONF_METER_STALE_MINUTES,
+                default=defaults.get(
+                    CONF_METER_STALE_MINUTES,
+                    DEFAULT_SESSION_THRESHOLDS[CONF_METER_STALE_MINUTES],
+                ),
+            ): int,
+            vol.Optional(
+                CONF_OFFLINE_TIMEOUT_MINUTES,
+                default=defaults.get(
+                    CONF_OFFLINE_TIMEOUT_MINUTES,
+                    DEFAULT_SESSION_THRESHOLDS[CONF_OFFLINE_TIMEOUT_MINUTES],
+                ),
             ): int,
         }
     )

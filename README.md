@@ -14,6 +14,8 @@ The integration adds a sidebar panel with:
   outlet
 - centrally stored outlet on/off audit logs with timestamps
 - persisted charging sessions and billing reports stored in Home Assistant
+- local customer, vehicle, and user-group records
+- formal charging-session state tracking for future tariff/load-management work
 - configurable energy rate and currency for billing reports
 - live charge timers on managed outlets
 - current load, total energy, and per-device/entity summaries
@@ -115,6 +117,10 @@ The panel stores charge sessions and billing settings in Home Assistant storage
 under `.storage/pow_reporting.billing`. Outlet audit events are stored under
 `.storage/pow_reporting.outlet_log`.
 
+Phase 1/2 managed session and customer records are stored under
+`.storage/pow_reporting.sessions`. This schema is additive so existing billing
+and audit data remains valid.
+
 Charging sessions are recorded when outlets are controlled through the HACS
 panel:
 
@@ -127,6 +133,39 @@ panel:
 Home Assistant Recorder remains the source for raw sensor history and charting.
 The HACS integration owns the commercial/session context: reference, rate,
 start/end readings, and billing totals.
+
+### Managed Records
+
+The dashboard **Records** tab stores lightweight local records for:
+
+- Customers: name, contact details, apartment/unit/company, billing reference,
+  user group, status, and notes
+- Vehicles: linked customer, registration, make/model description, and notes
+- User groups: default tariff placeholder, priority, charging allowed, free
+  charging, and discount percentage
+
+The existing free-text outlet reference remains available. Customer and vehicle
+selectors will be added to the outlet start workflow before tariff profiles are
+applied.
+
+### Session State Tracking
+
+Alongside the existing billing session list, ParkPower now keeps a richer
+managed-session ledger with states such as `waiting_for_load`, `charging`,
+`idle_grace_period`, `completed`, `cancelled`, and `requires_review`.
+
+Configurable thresholds control delayed charging start/stop detection:
+
+- `charging_start_watts`
+- `charging_start_delay_seconds`
+- `charging_stop_watts`
+- `charging_stop_delay_minutes`
+- `maximum_session_hours`
+- `meter_stale_minutes`
+- `offline_timeout_minutes`
+
+The integration listens to matched Home Assistant power and energy sensors so
+live readings can advance sessions from waiting, to charging, to completed.
 
 ### Outlet Mapping
 

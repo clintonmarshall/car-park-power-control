@@ -68,6 +68,8 @@ class PowReportingPanel extends HTMLElement {
     this._entityRegistry = new Map();
     this._auditLog = [];
     this._activeReferences = {};
+    this._records = { customers: [], vehicles: [], user_groups: [] };
+    this._recordQuery = "";
     this._busySwitches = new Set();
     this._allOffReference = "Master ALL Off";
     this._selectedEntity = "";
@@ -102,6 +104,7 @@ class PowReportingPanel extends HTMLElement {
       this._loadRegistries();
       this._loadOutletLog();
       this._loadBillingReport();
+      this._loadRecords();
     }
     this._computeEntities();
     this._requestRender();
@@ -210,6 +213,19 @@ class PowReportingPanel extends HTMLElement {
       this._requestRender();
     } catch (err) {
       this._billingMessage = err?.message || "Unable to load billing report.";
+    }
+  }
+
+  async _loadRecords() {
+    if (!this._hass?.callWS) return;
+    try {
+      this._records = await this._hass.callWS({
+        type: "pow_reporting/get_records",
+        query: this._recordQuery,
+      });
+      this._requestRender();
+    } catch (err) {
+      this._recordsError = err?.message || "Unable to load customer records.";
     }
   }
 
@@ -439,6 +455,50 @@ class PowReportingPanel extends HTMLElement {
     } finally {
       this._allOffBusy = false;
       this._requestRender();
+    }
+  }
+
+  _formFields(form) {
+    return Object.fromEntries([...new FormData(form).entries()].map(([key, value]) => [key, String(value).trim()]));
+  }
+
+  async _saveRecord(recordType, form) {
+    if (!this._hass?.callWS) return;
+    const fields = this._formFields(form);
+    if (recordType === "user_group") {
+      fields.priority = Number(fields.priority || 0);
+      fields.discount_percentage = Number(fields.discount_percentage || 0);
+      fields.charging_allowed = form.querySelector("[name='charging_allowed']")?.checked ?? false;
+      fields.free_charging = form.querySelector("[name='free_charging']")?.checked ?? false;
+    }
+    this._recordsNotice = "";
+    try {
+      await this._hass.callWS({
+        type: "pow_reporting/save_record",
+        record_type: recordType,
+        fields,
+      });
+      form.reset();
+      this._recordsNotice = "Record saved.";
+      await this._loadRecords();
+    } catch (err) {
+      this._recordsNotice = err?.message || "Unable to save record.";
+      this._requestRender({ force: true });
+    }
+  }
+
+  async _archiveRecord(recordType, recordId) {
+    if (!this._hass?.callWS || !recordId) return;
+    try {
+      await this._hass.callWS({
+        type: "pow_reporting/archive_record",
+        record_type: recordType,
+        record_id: recordId,
+      });
+      await this._loadRecords();
+    } catch (err) {
+      this._recordsNotice = err?.message || "Unable to archive record.";
+      this._requestRender({ force: true });
     }
   }
 
@@ -729,6 +789,7 @@ class PowReportingPanel extends HTMLElement {
             ${this._tabButton("dashboard", "Dashboard")}
             ${this._tabButton("outlets", "Outlets")}
             ${this._tabButton("reports", "Reports")}
+            ${this._tabButton("records", "Records")}
             ${this._tabButton("settings", "Settings")}
           </nav>`}
         </header>
@@ -737,6 +798,7 @@ class PowReportingPanel extends HTMLElement {
         ${!isPortal && this._activeTab === "dashboard" ? this._dashboard(totals, powerRows, energyRows) : ""}
         ${!isPortal && this._activeTab === "outlets" ? this._outletsView() : ""}
         ${!isPortal && this._activeTab === "reports" ? this._reports() : ""}
+        ${!isPortal && this._activeTab === "records" ? this._recordsView() : ""}
         ${!isPortal && this._activeTab === "settings" ? this._settingsView() : ""}
       </main>
     `;
@@ -772,6 +834,22 @@ class PowReportingPanel extends HTMLElement {
     this.shadowRoot.querySelector("#portal-search")?.addEventListener("input", (event) => {
       this._portalQuery = event.target.value;
       this._requestRender();
+    });
+    this.shadowRoot.querySelector("#record-search")?.addEventListener("input", (event) => {
+      this._recordQuery = event.target.value;
+      window.clearTimeout(this._recordSearchTimer);
+      this._recordSearchTimer = window.setTimeout(() => this._loadRecords(), 250);
+    });
+    this.shadowRoot.querySelectorAll("[data-record-form]").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        this._saveRecord(form.dataset.recordForm, form);
+      });
+    });
+    this.shadowRoot.querySelectorAll("[data-archive-record]").forEach((button) => {
+      button.addEventListener("click", () => {
+        this._archiveRecord(button.dataset.recordType, button.dataset.recordId);
+      });
     });
     this.shadowRoot.querySelector("#master-all-off")?.addEventListener("click", () => this._allOff());
     this.shadowRoot.querySelectorAll("[data-outlet-action]").forEach((button) => {
@@ -1072,6 +1150,109 @@ class PowReportingPanel extends HTMLElement {
     `;
   }
 
+  _recordsView() {
+    const customers = this._records?.customers || [];
+    const vehicles = this._records?.vehicles || [];
+    const groups = this._records?.user_groups || [];
+    return `
+      <section class="record-tools">
+        <label>Search records<input id="record-search" value="${htmlEscape(this._recordQuery)}" placeholder="Name, rego, billing ref"></label>
+      </section>
+      ${this._recordsError ? `<p class="notice">${htmlEscape(this._recordsError)}</p>` : ""}
+      ${this._recordsNotice ? `<p class="notice">${htmlEscape(this._recordsNotice)}</p>` : ""}
+      <section class="record-grid">
+        <div class="record-panel">
+          <h2>Customers</h2>
+          <form data-record-form="customer" class="record-form">
+            <input name="display_name" placeholder="Display name" required>
+            <input name="contact_email" placeholder="Email">
+            <input name="contact_telephone" placeholder="Telephone">
+            <input name="apartment_unit_company" placeholder="Apartment, unit, or company">
+            <input name="billing_reference" placeholder="Billing reference">
+            <select name="user_group">
+              <option value="">No group</option>
+              ${groups.map((group) => `<option value="${htmlEscape(group.id)}">${htmlEscape(group.name)}</option>`).join("")}
+            </select>
+            <input name="notes" placeholder="Notes">
+            <button>Save Customer</button>
+          </form>
+          <div class="record-list">${customers.map((record) => this._customerRow(record, groups)).join("") || `<div class="empty">No customers found.</div>`}</div>
+        </div>
+        <div class="record-panel">
+          <h2>Vehicles</h2>
+          <form data-record-form="vehicle" class="record-form">
+            <select name="customer_id">
+              <option value="">No customer</option>
+              ${customers.map((customer) => `<option value="${htmlEscape(customer.id)}">${htmlEscape(customer.display_name)}</option>`).join("")}
+            </select>
+            <input name="registration" placeholder="Registration" required>
+            <input name="make_model_description" placeholder="Make / model">
+            <input name="notes" placeholder="Notes">
+            <button>Save Vehicle</button>
+          </form>
+          <div class="record-list">${vehicles.map((record) => this._vehicleRow(record, customers)).join("") || `<div class="empty">No vehicles found.</div>`}</div>
+        </div>
+        <div class="record-panel">
+          <h2>User Groups</h2>
+          <form data-record-form="user_group" class="record-form">
+            <input name="name" placeholder="Group name" required>
+            <input name="default_tariff" placeholder="Default tariff">
+            <input name="priority" type="number" min="0" step="1" placeholder="Priority">
+            <input name="discount_percentage" type="number" min="0" max="100" step="0.01" placeholder="Discount %">
+            <label class="check"><input name="charging_allowed" type="checkbox" checked> Charging allowed</label>
+            <label class="check"><input name="free_charging" type="checkbox"> Free charging</label>
+            <button>Save Group</button>
+          </form>
+          <div class="record-list">${groups.map((record) => this._groupRow(record)).join("") || `<div class="empty">No groups found.</div>`}</div>
+        </div>
+      </section>
+    `;
+  }
+
+  _customerRow(record, groups) {
+    const group = groups.find((item) => item.id === record.user_group);
+    return this._recordRow("customer", record.id, record.display_name, [
+      record.apartment_unit_company,
+      record.billing_reference,
+      group?.name,
+      record.contact_email,
+    ]);
+  }
+
+  _vehicleRow(record, customers) {
+    const customer = customers.find((item) => item.id === record.customer_id);
+    return this._recordRow("vehicle", record.id, record.registration, [
+      record.make_model_description,
+      customer?.display_name,
+      record.notes,
+    ]);
+  }
+
+  _groupRow(record) {
+    return this._recordRow("user_group", record.id, record.name, [
+      `Priority ${record.priority ?? 0}`,
+      record.free_charging ? "Free charging" : `${formatNumber(record.discount_percentage || 0, 2)}% discount`,
+      record.charging_allowed ? "Allowed" : "Blocked",
+    ]);
+  }
+
+  _recordRow(recordType, recordId, title, details) {
+    return `
+      <div class="record-row">
+        <span>
+          <strong>${htmlEscape(title || recordId)}</strong>
+          <small>${details.filter(Boolean).map(htmlEscape).join(" · ")}</small>
+        </span>
+        <button
+          class="secondary"
+          data-archive-record
+          data-record-type="${htmlEscape(recordType)}"
+          data-record-id="${htmlEscape(recordId)}"
+        >Archive</button>
+      </div>
+    `;
+  }
+
   _settingsView() {
     const changed = this._renamePreview.filter((item) => item.changed).length;
     return `
@@ -1151,7 +1332,18 @@ class PowReportingPanel extends HTMLElement {
       .report-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 12px; }
       label { display: grid; gap: 6px; color: #5d6972; font-size: 13px; }
       select, input { min-width: 220px; border: 1px solid #cfd8de; border-radius: 7px; padding: 9px 10px; background: #fff; color: #172026; }
+      input[type="checkbox"] { min-width: 0; width: auto; }
       .report-card { padding: 16px; min-height: 360px; }
+      .record-tools { margin-bottom: 14px; }
+      .record-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+      .record-panel { display: grid; gap: 12px; background: #fff; border: 1px solid #dde3e7; border-radius: 8px; padding: 16px; }
+      .record-form { display: grid; gap: 8px; }
+      .record-form select, .record-form input { min-width: 0; width: 100%; box-sizing: border-box; }
+      .check { display: flex; align-items: center; gap: 8px; color: #172026; }
+      .record-list { display: grid; gap: 8px; }
+      .record-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; border-top: 1px solid #edf0f2; padding-top: 9px; }
+      .record-row span { min-width: 0; }
+      .record-row strong, .record-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .master-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 320px) auto; gap: 12px; align-items: end; padding: 16px; margin-bottom: 16px; }
       .master-control p { margin-top: 4px; }
       .outlet-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-bottom: 18px; }
@@ -1221,6 +1413,7 @@ class PowReportingPanel extends HTMLElement {
         .portal-hero { grid-template-columns: 1fr; }
         nav { overflow-x: auto; }
         .summary-grid, .billing-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .record-grid { grid-template-columns: 1fr; }
         .master-control, .audit-row, .rename-row, .billing-row, .aggregate-row { grid-template-columns: 1fr; }
         .outlet-actions { display: grid; }
         select, input { min-width: 0; width: 100%; box-sizing: border-box; }
