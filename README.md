@@ -20,6 +20,8 @@ The integration adds a sidebar panel with:
 - live charge timers on managed outlets
 - current load, total energy, and per-device/entity summaries
 - daily, weekly, monthly, and custom-range reports
+- management KPIs, report filters, chart-ready summaries, and monthly statement
+  totals
 - charting from Home Assistant recorder statistics when available
 - CSV export for energy statistics, outlet power events, and billing sessions
 - local dashboard branding controls for name, logo URL, and accent color
@@ -166,6 +168,24 @@ Configurable thresholds control delayed charging start/stop detection:
 
 The integration listens to matched Home Assistant power and energy sensors so
 live readings can advance sessions from waiting, to charging, to completed.
+
+### Management Reports
+
+The dashboard **Reports** tab includes Phase 4 management reporting:
+
+- total managed, available, charging, waiting, paused, offline, and faulted
+  outlets
+- sessions today, energy today, monthly energy, estimated recovery, live demand,
+  average kWh, average duration, and utilisation
+- filters for period, outlet, billing status, and reference text
+- chart-ready summaries for energy by day, sessions by day, top outlets, costs,
+  and live outlet load
+- CSV export for filtered management sessions
+- monthly-style statement totals for measured energy, electricity cost,
+  recoverable amount, invoiced, paid, waived, and outstanding values
+
+Tariff-specific reporting columns are intentionally prepared but not fully
+calculated until tariff profiles are added in Phase 3.
 
 ### Outlet Mapping
 

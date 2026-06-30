@@ -76,6 +76,8 @@ class PowReportingPanel extends HTMLElement {
     this._period = "day";
     this._billingPeriod = "day";
     this._billingReport = { settings: { energy_rate: 0.32, currency: "AUD" }, active: [], completed: [], sessions: [] };
+    this._managementReport = { kpis: {}, charts: {}, statement: {}, sessions: [] };
+    this._managementMessage = "";
     this._billingMessage = "";
     this._portalQuery = "";
     this._panelMode = "admin";
@@ -104,6 +106,7 @@ class PowReportingPanel extends HTMLElement {
       this._loadRegistries();
       this._loadOutletLog();
       this._loadBillingReport();
+      this._loadManagementReport();
       this._loadRecords();
     }
     this._computeEntities();
@@ -214,6 +217,32 @@ class PowReportingPanel extends HTMLElement {
     } catch (err) {
       this._billingMessage = err?.message || "Unable to load billing report.";
     }
+  }
+
+  async _loadManagementReport() {
+    if (!this._hass?.callWS) return;
+    try {
+      const data = await this._hass.callWS({
+        type: "pow_reporting/get_management_report",
+        period: this._billingPeriod,
+        filters: this._reportFilterPayload(),
+      });
+      this._managementReport = data || { kpis: {}, charts: {}, statement: {}, sessions: [] };
+      this._requestRender();
+    } catch (err) {
+      this._managementMessage = err?.message || "Unable to load management report.";
+    }
+  }
+
+  _reportFilterPayload() {
+    const reference = this.shadowRoot?.querySelector("#report-reference-filter")?.value?.trim() || "";
+    const outlet = this.shadowRoot?.querySelector("#report-outlet-filter")?.value || "";
+    const billingStatus = this.shadowRoot?.querySelector("#report-billing-filter")?.value || "";
+    return {
+      ...(reference ? { reference } : {}),
+      ...(outlet ? { outlet } : {}),
+      ...(billingStatus ? { billing_status: billingStatus } : {}),
+    };
   }
 
   async _loadRecords() {
@@ -425,6 +454,7 @@ class PowReportingPanel extends HTMLElement {
       });
       await this._loadOutletLog();
       await this._loadBillingReport();
+      await this._loadManagementReport();
     } catch (err) {
       this._notice = err?.message || "Unable to control outlet.";
     } finally {
@@ -450,6 +480,7 @@ class PowReportingPanel extends HTMLElement {
       });
       await this._loadOutletLog();
       await this._loadBillingReport();
+      await this._loadManagementReport();
     } catch (err) {
       this._notice = err?.message || "Unable to run master all-off.";
     } finally {
@@ -520,6 +551,7 @@ class PowReportingPanel extends HTMLElement {
         completed: Array.isArray(data?.completed) ? data.completed : [],
         sessions: Array.isArray(data?.sessions) ? data.sessions : [],
       };
+      await this._loadManagementReport();
       this._billingMessage = "Billing settings saved.";
     } catch (err) {
       this._billingMessage = err?.message || "Unable to save billing settings.";
@@ -644,6 +676,36 @@ class PowReportingPanel extends HTMLElement {
     const link = document.createElement("a");
     link.href = url;
     link.download = "aggregate-meter-cost.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  _downloadManagementCsv() {
+    const sessions = this._managementReport?.sessions || [];
+    const rows = [
+      ["start", "end", "outlet", "switch_entity_id", "reference", "customer", "vehicle", "user_group", "duration_seconds", "energy_kwh", "cost", "billing_status", "currency"],
+      ...sessions.map((session) => [
+        session.start,
+        session.end,
+        session.outlet,
+        session.switch_entity_id,
+        session.reference,
+        session.customer,
+        session.vehicle,
+        session.user_group,
+        session.duration_seconds,
+        session.energy_kwh,
+        session.cost,
+        session.billing_status,
+        session.currency,
+      ]),
+    ];
+    const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `management-report-${this._billingPeriod}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -825,10 +887,16 @@ class PowReportingPanel extends HTMLElement {
     this.shadowRoot.querySelector("#download-csv")?.addEventListener("click", () => this._downloadCsv());
     this.shadowRoot.querySelector("#download-audit-csv")?.addEventListener("click", () => this._downloadAuditCsv());
     this.shadowRoot.querySelector("#download-billing-csv")?.addEventListener("click", () => this._downloadBillingCsv());
+    this.shadowRoot.querySelector("#download-management-csv")?.addEventListener("click", () => this._downloadManagementCsv());
     this.shadowRoot.querySelector("#download-aggregate-cost-csv")?.addEventListener("click", () => this._downloadAggregateCostCsv());
     this.shadowRoot.querySelector("#billing-period-select")?.addEventListener("change", (event) => {
       this._billingPeriod = event.target.value;
+      this._loadManagementReport();
       this._render();
+    });
+    this.shadowRoot.querySelector("#refresh-management-report")?.addEventListener("click", () => this._loadManagementReport());
+    this.shadowRoot.querySelectorAll("[data-management-filter]").forEach((input) => {
+      input.addEventListener("change", () => this._loadManagementReport());
     });
     this.shadowRoot.querySelector("#save-billing-settings")?.addEventListener("click", () => this._saveBillingSettings());
     this.shadowRoot.querySelector("#portal-search")?.addEventListener("input", (event) => {
@@ -1069,7 +1137,44 @@ class PowReportingPanel extends HTMLElement {
     const billingTotals = this._billingTotals(billingSessions);
     const aggregate = this._aggregateMeterRows();
     const currency = this._billingReport.settings?.currency || "AUD";
+    const managementSessions = this._managementReport?.sessions || [];
     return `
+      <section class="billing-card">
+        <div class="section-head">
+          <div>
+            <h2>Management Dashboard</h2>
+            <p>Operational KPIs from managed outlets, sessions, and local records.</p>
+          </div>
+          <button id="refresh-management-report">Refresh</button>
+        </div>
+        ${this._managementMessage ? `<p class="notice">${htmlEscape(this._managementMessage)}</p>` : ""}
+        ${this._managementKpis()}
+        <section class="report-controls management-filters">
+          <label>Billing period<select id="billing-period-select">
+            <option value="day" ${this._billingPeriod === "day" ? "selected" : ""}>Today</option>
+            <option value="week" ${this._billingPeriod === "week" ? "selected" : ""}>Last 7 days</option>
+            <option value="month" ${this._billingPeriod === "month" ? "selected" : ""}>This month</option>
+            <option value="all" ${this._billingPeriod === "all" ? "selected" : ""}>All sessions</option>
+          </select></label>
+          <label>Outlet<select id="report-outlet-filter" data-management-filter>
+            <option value="">All outlets</option>
+            ${this._outlets.map((outlet) => `<option value="${htmlEscape(outlet.entity.entity_id)}">${htmlEscape(outlet.name)}</option>`).join("")}
+          </select></label>
+          <label>Status<select id="report-billing-filter" data-management-filter>
+            <option value="">All statuses</option>
+            ${(this._managementReport?.billing_states || []).map((state) => `<option value="${htmlEscape(state)}">${htmlEscape(state)}</option>`).join("")}
+          </select></label>
+          <label>Reference<input id="report-reference-filter" data-management-filter placeholder="Customer, bay, ref"></label>
+          <button id="download-management-csv" ${managementSessions.length ? "" : "disabled"}>Management CSV</button>
+        </section>
+        ${this._statementCards(currency)}
+        <div class="management-charts">
+          ${this._smallSeries("Energy by Day", this._managementReport?.charts?.energy_by_day, "kWh")}
+          ${this._smallSeries("Sessions by Day", this._managementReport?.charts?.sessions_by_day, "")}
+          ${this._smallSeries("Top Outlets", this._managementReport?.charts?.top_outlets, "kWh")}
+          ${this._smallSeries("Costs", this._managementReport?.charts?.costs_and_recoverable_amounts, currency)}
+        </div>
+      </section>
       <section class="report-controls">
         <label>Entity<select id="entity-select">${options}</select></label>
         <label>Period<select id="period-select">
@@ -1118,12 +1223,6 @@ class PowReportingPanel extends HTMLElement {
             <p>Stored inside Home Assistant by this HACS integration.</p>
           </div>
           <div class="billing-actions">
-            <label>Billing period<select id="billing-period-select">
-              <option value="day" ${this._billingPeriod === "day" ? "selected" : ""}>Today</option>
-              <option value="week" ${this._billingPeriod === "week" ? "selected" : ""}>Last 7 days</option>
-              <option value="month" ${this._billingPeriod === "month" ? "selected" : ""}>This month</option>
-              <option value="all" ${this._billingPeriod === "all" ? "selected" : ""}>All sessions</option>
-            </select></label>
             <button id="download-billing-csv" ${billingSessions.length ? "" : "disabled"}>Billing CSV</button>
           </div>
         </div>
@@ -1147,6 +1246,63 @@ class PowReportingPanel extends HTMLElement {
           `).join("") : `<div class="empty">No completed billing sessions for this period yet.</div>`}
         </div>
       </section>
+    `;
+  }
+
+  _managementKpis() {
+    const kpis = this._managementReport?.kpis || {};
+    const items = [
+      ["Managed outlets", kpis.total_managed_outlets],
+      ["Available", kpis.available_outlets],
+      ["Charging", kpis.active_charging_outlets],
+      ["Waiting", kpis.waiting_outlets],
+      ["Paused", kpis.load_managed_paused_outlets],
+      ["Offline", kpis.offline_outlets],
+      ["Faulted", kpis.faulted_outlets],
+      ["Sessions today", kpis.sessions_today],
+      ["Energy today", formatEnergyKwh(kpis.energy_today, "kWh")],
+      ["Energy month", formatEnergyKwh(kpis.energy_this_month, "kWh")],
+      ["Recovery", formatCurrency(kpis.estimated_cost_recovery, this._managementReport?.currency || "AUD")],
+      ["Peak demand", `${formatNumber(kpis.peak_charging_demand, 0)} W`],
+      ["Avg kWh", formatEnergyKwh(kpis.average_kwh_per_session, "kWh")],
+      ["Avg duration", formatDuration(kpis.average_charging_duration)],
+      ["Utilisation", `${formatNumber(kpis.utilisation_percentage, 1)}%`],
+    ];
+    return `<section class="management-kpis">${items.map(([label, value]) => `
+      <article><span>${htmlEscape(label)}</span><strong>${htmlEscape(value ?? "--")}</strong></article>
+    `).join("")}</section>`;
+  }
+
+  _statementCards(currency) {
+    const statement = this._managementReport?.statement || {};
+    const items = [
+      ["Measured energy", formatEnergyKwh(statement.total_measured_charging_energy, "kWh")],
+      ["Electricity cost", formatCurrency(statement.underlying_electricity_cost, currency)],
+      ["Energy charges", formatCurrency(statement.energy_charges, currency)],
+      ["Management fees", formatCurrency(statement.management_fees, currency)],
+      ["Waived", formatCurrency(statement.waived_sessions, currency)],
+      ["Recoverable", formatCurrency(statement.total_recoverable_amount, currency)],
+      ["Invoiced", formatCurrency(statement.amount_marked_invoiced, currency)],
+      ["Paid", formatCurrency(statement.amount_marked_paid, currency)],
+      ["Outstanding", formatCurrency(statement.outstanding_amount, currency)],
+    ];
+    return `<section class="statement-grid">${items.map(([label, value]) => `
+      <article><span>${htmlEscape(label)}</span><strong>${htmlEscape(value)}</strong></article>
+    `).join("")}</section>`;
+  }
+
+  _smallSeries(title, rows = [], suffix = "") {
+    const displayRows = Array.isArray(rows) ? rows.slice(0, 8) : [];
+    return `
+      <div class="series-card">
+        <h2>${htmlEscape(title)}</h2>
+        ${displayRows.length ? displayRows.map((row) => `
+          <div class="series-row">
+            <span>${htmlEscape(row.label)}</span>
+            <b>${htmlEscape(suffix === this._managementReport?.currency ? formatCurrency(row.value, suffix) : `${formatNumber(row.value, 2)} ${suffix}`.trim())}</b>
+          </div>
+        `).join("") : `<div class="empty">No data for this filter.</div>`}
+      </div>
     `;
   }
 
@@ -1330,10 +1486,19 @@ class PowReportingPanel extends HTMLElement {
       .empty, .notice { padding: 18px; color: #5d6972; }
       .notice { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; margin-bottom: 14px; }
       .report-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 12px; }
+      .management-filters { margin-top: 12px; }
       label { display: grid; gap: 6px; color: #5d6972; font-size: 13px; }
       select, input { min-width: 220px; border: 1px solid #cfd8de; border-radius: 7px; padding: 9px 10px; background: #fff; color: #172026; }
       input[type="checkbox"] { min-width: 0; width: auto; }
       .report-card { padding: 16px; min-height: 360px; }
+      .management-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+      .management-kpis article, .statement-grid article { border-color: #edf0f2; box-shadow: none; }
+      .management-kpis strong, .statement-grid strong { font-size: 20px; }
+      .statement-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+      .management-charts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+      .series-card { border: 1px solid #edf0f2; border-radius: 8px; padding: 12px; }
+      .series-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 7px 0; border-top: 1px solid #edf0f2; }
+      .series-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5d6972; }
       .record-tools { margin-bottom: 14px; }
       .record-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
       .record-panel { display: grid; gap: 12px; background: #fff; border: 1px solid #dde3e7; border-radius: 8px; padding: 16px; }
@@ -1412,7 +1577,7 @@ class PowReportingPanel extends HTMLElement {
         header, .columns { grid-template-columns: 1fr; display: grid; }
         .portal-hero { grid-template-columns: 1fr; }
         nav { overflow-x: auto; }
-        .summary-grid, .billing-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .summary-grid, .billing-summary, .management-kpis, .statement-grid, .management-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .record-grid { grid-template-columns: 1fr; }
         .master-control, .audit-row, .rename-row, .billing-row, .aggregate-row { grid-template-columns: 1fr; }
         .outlet-actions { display: grid; }

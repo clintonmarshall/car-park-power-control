@@ -50,7 +50,9 @@ from .const import (
     PANEL_JS_URL,
 )
 from .coordinator import PowReportingCoordinator
+from .reporting import build_management_report, default_filter_period
 from .websocket import (
+    async_load_records_manager,
     async_load_session_manager,
     async_register_websocket_commands as async_register_session_websocket_commands,
     async_save_session_manager,
@@ -281,6 +283,7 @@ def _async_register_websocket_commands(hass: HomeAssistant) -> None:
 
     websocket_api.async_register_command(hass, _websocket_get_outlet_log)
     websocket_api.async_register_command(hass, _websocket_get_billing_report)
+    websocket_api.async_register_command(hass, _websocket_get_management_report)
     websocket_api.async_register_command(hass, _websocket_save_billing_settings)
     websocket_api.async_register_command(hass, _websocket_control_outlet)
     websocket_api.async_register_command(hass, _websocket_all_off)
@@ -1015,6 +1018,38 @@ async def _websocket_get_billing_report(
 ) -> None:
     """Return persisted billing/session report data."""
     connection.send_result(msg["id"], _billing_report(hass, await _async_load_billing(hass)))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "pow_reporting/get_management_report",
+        vol.Optional("period", default="month"): vol.In(["day", "week", "month", "all", "custom"]),
+        vol.Optional("filters", default={}): dict,
+    }
+)
+@websocket_api.async_response
+async def _websocket_get_management_report(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return Phase 4 management reporting data."""
+    filters = dict(default_filter_period(msg["period"]))
+    filters.update(msg["filters"])
+    billing = _billing_report(hass, await _async_load_billing(hass))
+    session_manager = await async_load_session_manager(hass)
+    records_manager = await async_load_records_manager(hass)
+    outlets = await _public_outlet_data(hass)
+    connection.send_result(
+        msg["id"],
+        build_management_report(
+            billing_report=billing,
+            session_data=session_manager.dump(),
+            records=records_manager.list_records(include_archived=True),
+            outlets=outlets,
+            filters=filters,
+        ),
+    )
 
 
 @websocket_api.websocket_command(
