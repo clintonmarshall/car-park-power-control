@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DEFAULT_SESSION_THRESHOLDS, DOMAIN
+from .hierarchy_manager import HIERARCHY_COLLECTION_NAMES
 
 SESSION_STORAGE_KEY = f"{DOMAIN}.sessions"
 SESSION_STORAGE_VERSION = 1
@@ -40,13 +41,15 @@ class PowReportingStore:
         data["customers"] = list(data.get("customers", []))[-MAX_RECORD_ROWS:]
         data["vehicles"] = list(data.get("vehicles", []))[-MAX_RECORD_ROWS:]
         data["user_groups"] = list(data.get("user_groups", []))[-MAX_RECORD_ROWS:]
+        for collection_name in HIERARCHY_COLLECTION_NAMES:
+            data[collection_name] = list(data.get(collection_name, []))[-MAX_RECORD_ROWS:]
         await self._store.async_save(data)
 
 
 def _empty_data() -> dict[str, Any]:
     """Return the current empty schema."""
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "sessions": [],
         "active_sessions": {},
         "thresholds": dict(DEFAULT_SESSION_THRESHOLDS),
@@ -54,17 +57,25 @@ def _empty_data() -> dict[str, Any]:
         "customers": [],
         "vehicles": [],
         "user_groups": [],
+        "organisations": [],
+        "sites": [],
+        "buildings": [],
+        "distribution_boards": [],
+        "circuit_groups": [],
+        "outlet_mappings": [],
     }
 
 
 def _migrate_data(data: dict[str, Any]) -> dict[str, Any]:
     """Migrate storage in-place without invalidating existing records."""
     migrated = {**_empty_data(), **data}
-    migrated["schema_version"] = 2
+    migrated["schema_version"] = 3
     migrated["sessions"] = list(migrated.get("sessions") or [])
     migrated["customers"] = list(migrated.get("customers") or [])
     migrated["vehicles"] = list(migrated.get("vehicles") or [])
     migrated["user_groups"] = list(migrated.get("user_groups") or [])
+    for collection_name in HIERARCHY_COLLECTION_NAMES:
+        migrated[collection_name] = list(migrated.get(collection_name) or [])
     migrated["active_sessions"] = dict(migrated.get("active_sessions") or {})
     migrated["thresholds"] = {
         **DEFAULT_SESSION_THRESHOLDS,

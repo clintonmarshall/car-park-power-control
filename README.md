@@ -15,6 +15,8 @@ The integration adds a sidebar panel with:
 - centrally stored outlet on/off audit logs with timestamps
 - persisted charging sessions and billing reports stored in Home Assistant
 - local customer, vehicle, and user-group records
+- local organisation, site, building, distribution board, circuit group, and
+  outlet assignment records
 - formal charging-session state tracking for future tariff/load-management work
 - configurable energy rate and currency for billing reports
 - live charge timers on managed outlets
@@ -149,6 +151,23 @@ The dashboard **Records** tab stores lightweight local records for:
 The existing free-text outlet reference remains available. Customer and vehicle
 selectors will be added to the outlet start workflow before tariff profiles are
 applied.
+
+### Site And Electrical Hierarchy
+
+The dashboard **Hierarchy** tab stores Phase 5 commercial and electrical context:
+
+- organisations, sites, buildings/levels, distribution boards, circuit groups,
+  and outlet assignments
+- electrical limits such as maximum current, maximum power, reserve margin,
+  warning threshold, maximum simultaneous outlets, load-management mode, relay
+  timing limits, relay operation limits, optional main-meter power entity, and
+  enabled/disabled state
+- outlet mappings that can start from Home Assistant-discovered relay, power,
+  and energy entities, including HA area/floor/label metadata where available
+
+These records are local to the integration under `.storage/pow_reporting.sessions`.
+They are intended to become the policy source for load management and more
+detailed area/level reporting in the next phases.
 
 ### Session State Tracking
 

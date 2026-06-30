@@ -69,7 +69,17 @@ class PowReportingPanel extends HTMLElement {
     this._auditLog = [];
     this._activeReferences = {};
     this._records = { customers: [], vehicles: [], user_groups: [] };
+    this._hierarchy = {
+      organisations: [],
+      sites: [],
+      buildings: [],
+      distribution_boards: [],
+      circuit_groups: [],
+      outlet_mappings: [],
+      discovered_outlets: [],
+    };
     this._recordQuery = "";
+    this._hierarchyQuery = "";
     this._busySwitches = new Set();
     this._allOffReference = "Master ALL Off";
     this._selectedEntity = "";
@@ -108,6 +118,7 @@ class PowReportingPanel extends HTMLElement {
       this._loadBillingReport();
       this._loadManagementReport();
       this._loadRecords();
+      this._loadHierarchy();
     }
     this._computeEntities();
     this._requestRender();
@@ -255,6 +266,19 @@ class PowReportingPanel extends HTMLElement {
       this._requestRender();
     } catch (err) {
       this._recordsError = err?.message || "Unable to load customer records.";
+    }
+  }
+
+  async _loadHierarchy() {
+    if (!this._hass?.callWS) return;
+    try {
+      this._hierarchy = await this._hass.callWS({
+        type: "pow_reporting/get_hierarchy",
+        query: this._hierarchyQuery,
+      });
+      this._requestRender();
+    } catch (err) {
+      this._hierarchyError = err?.message || "Unable to load site hierarchy.";
     }
   }
 
@@ -514,6 +538,67 @@ class PowReportingPanel extends HTMLElement {
       await this._loadRecords();
     } catch (err) {
       this._recordsNotice = err?.message || "Unable to save record.";
+      this._requestRender({ force: true });
+    }
+  }
+
+  async _saveHierarchyRecord(recordType, form) {
+    if (!this._hass?.callWS) return;
+    const fields = this._formFields(form);
+    if (["distribution_board", "circuit_group"].includes(recordType)) {
+      [
+        "maximum_current",
+        "maximum_power",
+        "reserve_margin",
+        "warning_threshold",
+        "maximum_simultaneous_outlets",
+        "allocation_interval",
+        "minimum_relay_on_duration",
+        "minimum_relay_off_duration",
+        "maximum_relay_operations_per_hour",
+      ].forEach((key) => {
+        if (key in fields) fields[key] = fields[key] === "" ? null : Number(fields[key]);
+      });
+      fields.enabled = form.querySelector("[name='enabled']")?.checked ?? false;
+      if ("priority" in fields) fields.priority = Number(fields.priority || 0);
+    }
+    if (recordType === "outlet") {
+      const discovered = this._hierarchy.discovered_outlets?.find((item) => item.switch_entity_id === fields.switch_entity_id);
+      if (discovered) {
+        fields.power_entity_id ||= discovered.power_entity_id || "";
+        fields.energy_entity_id ||= discovered.energy_entity_id || "";
+        fields.ha_area_id ||= discovered.ha_area_id || "";
+        fields.ha_floor_id ||= discovered.ha_floor_id || "";
+        fields.ha_label_ids ||= (discovered.ha_label_ids || []).join(",");
+      }
+    }
+    this._hierarchyNotice = "";
+    try {
+      await this._hass.callWS({
+        type: "pow_reporting/save_hierarchy_record",
+        record_type: recordType,
+        fields,
+      });
+      form.reset();
+      this._hierarchyNotice = "Hierarchy record saved.";
+      await this._loadHierarchy();
+    } catch (err) {
+      this._hierarchyNotice = err?.message || "Unable to save hierarchy record.";
+      this._requestRender({ force: true });
+    }
+  }
+
+  async _archiveHierarchyRecord(recordType, recordId) {
+    if (!this._hass?.callWS || !recordId) return;
+    try {
+      await this._hass.callWS({
+        type: "pow_reporting/archive_hierarchy_record",
+        record_type: recordType,
+        record_id: recordId,
+      });
+      await this._loadHierarchy();
+    } catch (err) {
+      this._hierarchyNotice = err?.message || "Unable to archive hierarchy record.";
       this._requestRender({ force: true });
     }
   }
@@ -852,6 +937,7 @@ class PowReportingPanel extends HTMLElement {
             ${this._tabButton("outlets", "Outlets")}
             ${this._tabButton("reports", "Reports")}
             ${this._tabButton("records", "Records")}
+            ${this._tabButton("hierarchy", "Hierarchy")}
             ${this._tabButton("settings", "Settings")}
           </nav>`}
         </header>
@@ -861,6 +947,7 @@ class PowReportingPanel extends HTMLElement {
         ${!isPortal && this._activeTab === "outlets" ? this._outletsView() : ""}
         ${!isPortal && this._activeTab === "reports" ? this._reports() : ""}
         ${!isPortal && this._activeTab === "records" ? this._recordsView() : ""}
+        ${!isPortal && this._activeTab === "hierarchy" ? this._hierarchyView() : ""}
         ${!isPortal && this._activeTab === "settings" ? this._settingsView() : ""}
       </main>
     `;
@@ -917,6 +1004,22 @@ class PowReportingPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-archive-record]").forEach((button) => {
       button.addEventListener("click", () => {
         this._archiveRecord(button.dataset.recordType, button.dataset.recordId);
+      });
+    });
+    this.shadowRoot.querySelector("#hierarchy-search")?.addEventListener("input", (event) => {
+      this._hierarchyQuery = event.target.value;
+      window.clearTimeout(this._hierarchySearchTimer);
+      this._hierarchySearchTimer = window.setTimeout(() => this._loadHierarchy(), 250);
+    });
+    this.shadowRoot.querySelectorAll("[data-hierarchy-form]").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        this._saveHierarchyRecord(form.dataset.hierarchyForm, form);
+      });
+    });
+    this.shadowRoot.querySelectorAll("[data-archive-hierarchy]").forEach((button) => {
+      button.addEventListener("click", () => {
+        this._archiveHierarchyRecord(button.dataset.recordType, button.dataset.recordId);
       });
     });
     this.shadowRoot.querySelector("#master-all-off")?.addEventListener("click", () => this._allOff());
@@ -1409,6 +1512,159 @@ class PowReportingPanel extends HTMLElement {
     `;
   }
 
+  _hierarchyView() {
+    const data = this._hierarchy || {};
+    const organisations = data.organisations || [];
+    const sites = data.sites || [];
+    const buildings = data.buildings || [];
+    const boards = data.distribution_boards || [];
+    const circuits = data.circuit_groups || [];
+    const outlets = data.outlet_mappings || [];
+    const discovered = data.discovered_outlets || [];
+    return `
+      <section class="record-tools">
+        <label>Search hierarchy<input id="hierarchy-search" value="${htmlEscape(this._hierarchyQuery)}" placeholder="Site, board, circuit, outlet"></label>
+      </section>
+      ${this._hierarchyError ? `<p class="notice">${htmlEscape(this._hierarchyError)}</p>` : ""}
+      ${this._hierarchyNotice ? `<p class="notice">${htmlEscape(this._hierarchyNotice)}</p>` : ""}
+      <section class="hierarchy-grid">
+        <div class="record-panel">
+          <h2>Organisations</h2>
+          <form data-hierarchy-form="organisation" class="record-form">
+            <input name="name" placeholder="Organisation name" required>
+            <input name="billing_reference" placeholder="Billing reference">
+            <input name="notes" placeholder="Notes">
+            <button>Save Organisation</button>
+          </form>
+          <div class="record-list">${organisations.map((record) => this._hierarchyRow("organisation", record.id, record.name, [record.billing_reference, record.notes])).join("") || `<div class="empty">No organisations yet.</div>`}</div>
+        </div>
+        <div class="record-panel">
+          <h2>Sites</h2>
+          <form data-hierarchy-form="site" class="record-form">
+            ${this._select("organisation_id", "No organisation", organisations, "name")}
+            <input name="name" placeholder="Site name" required>
+            <input name="address" placeholder="Address">
+            <input name="timezone" placeholder="Timezone">
+            <input name="notes" placeholder="Notes">
+            <button>Save Site</button>
+          </form>
+          <div class="record-list">${sites.map((record) => this._hierarchyRow("site", record.id, record.name, [this._nameById(organisations, record.organisation_id), record.address])).join("") || `<div class="empty">No sites yet.</div>`}</div>
+        </div>
+        <div class="record-panel">
+          <h2>Buildings / Levels</h2>
+          <form data-hierarchy-form="building" class="record-form">
+            ${this._select("site_id", "No site", sites, "name")}
+            <input name="name" placeholder="Building or level name" required>
+            <input name="ha_floor_id" placeholder="HA floor id">
+            <input name="notes" placeholder="Notes">
+            <button>Save Building</button>
+          </form>
+          <div class="record-list">${buildings.map((record) => this._hierarchyRow("building", record.id, record.name, [this._nameById(sites, record.site_id), record.ha_floor_id])).join("") || `<div class="empty">No buildings or levels yet.</div>`}</div>
+        </div>
+        <div class="record-panel">
+          <h2>Distribution Boards</h2>
+          <form data-hierarchy-form="distribution_board" class="record-form">
+            ${this._select("building_id", "No building", buildings, "name")}
+            <input name="name" placeholder="Board name" required>
+            ${this._electricalInputs()}
+            <input name="main_meter_power_entity" placeholder="Main meter power entity">
+            <label class="check"><input name="enabled" type="checkbox" checked> Enabled</label>
+            <input name="notes" placeholder="Notes">
+            <button>Save Board</button>
+          </form>
+          <div class="record-list">${boards.map((record) => this._hierarchyRow("distribution_board", record.id, record.name, [this._nameById(buildings, record.building_id), this._electricalSummary(record), record.enabled === false ? "Disabled" : "Enabled"])).join("") || `<div class="empty">No distribution boards yet.</div>`}</div>
+        </div>
+        <div class="record-panel">
+          <h2>Circuit Groups</h2>
+          <form data-hierarchy-form="circuit_group" class="record-form">
+            ${this._select("distribution_board_id", "No board", boards, "name")}
+            <input name="name" placeholder="Circuit group name" required>
+            ${this._electricalInputs()}
+            <input name="maximum_simultaneous_outlets" type="number" min="0" step="1" placeholder="Max simultaneous outlets">
+            <select name="load_management_mode">
+              <option value="monitor_only">Monitor only</option>
+              <option value="first_in_first_out">First in first out</option>
+              <option value="priority">Priority</option>
+              <option value="manual">Manual</option>
+            </select>
+            <input name="allocation_interval" type="number" min="0" step="1" placeholder="Allocation interval seconds">
+            <input name="minimum_relay_on_duration" type="number" min="0" step="1" placeholder="Minimum relay-on seconds">
+            <input name="minimum_relay_off_duration" type="number" min="0" step="1" placeholder="Minimum relay-off seconds">
+            <input name="maximum_relay_operations_per_hour" type="number" min="0" step="1" placeholder="Max relay operations/hour">
+            <input name="priority" type="number" min="0" step="1" placeholder="Priority">
+            <input name="main_meter_power_entity" placeholder="Main meter power entity">
+            <label class="check"><input name="enabled" type="checkbox" checked> Enabled</label>
+            <button>Save Circuit</button>
+          </form>
+          <div class="record-list">${circuits.map((record) => this._hierarchyRow("circuit_group", record.id, record.name, [this._nameById(boards, record.distribution_board_id), this._electricalSummary(record), `${record.maximum_simultaneous_outlets ?? "--"} simultaneous`])).join("") || `<div class="empty">No circuit groups yet.</div>`}</div>
+        </div>
+        <div class="record-panel">
+          <h2>Outlet Assignments</h2>
+          <form data-hierarchy-form="outlet" class="record-form">
+            <select name="switch_entity_id" required>
+              <option value="">Select discovered outlet</option>
+              ${discovered.map((outlet) => `<option value="${htmlEscape(outlet.switch_entity_id)}">${htmlEscape(outlet.switch_name || outlet.switch_entity_id)}</option>`).join("")}
+            </select>
+            ${this._select("site_id", "No site", sites, "name")}
+            ${this._select("building_id", "No building", buildings, "name")}
+            ${this._select("distribution_board_id", "No board", boards, "name")}
+            ${this._select("circuit_group_id", "No circuit", circuits, "name")}
+            <input name="level" placeholder="Level">
+            <input name="area" placeholder="Area">
+            <input name="bay" placeholder="Bay / car park spot">
+            <input name="power_entity_id" placeholder="Power entity override">
+            <input name="energy_entity_id" placeholder="Energy entity override">
+            <input name="ha_label_ids" placeholder="HA labels, comma separated">
+            <button>Assign Outlet</button>
+          </form>
+          <div class="record-list">${outlets.map((record) => this._hierarchyRow("outlet", record.id, record.switch_entity_id, [record.bay, this._nameById(circuits, record.circuit_group_id), record.power_entity_id, record.energy_entity_id])).join("") || `<div class="empty">No outlet assignments yet.</div>`}</div>
+        </div>
+      </section>
+    `;
+  }
+
+  _select(name, emptyLabel, rows, labelKey) {
+    return `<select name="${htmlEscape(name)}"><option value="">${htmlEscape(emptyLabel)}</option>${rows.map((row) => `<option value="${htmlEscape(row.id)}">${htmlEscape(row[labelKey] || row.id)}</option>`).join("")}</select>`;
+  }
+
+  _nameById(rows, id) {
+    return rows.find((row) => row.id === id)?.name || "";
+  }
+
+  _electricalInputs() {
+    return `
+      <input name="maximum_current" type="number" min="0" step="0.01" placeholder="Maximum current A">
+      <input name="maximum_power" type="number" min="0" step="0.01" placeholder="Maximum power W">
+      <input name="reserve_margin" type="number" min="0" step="0.01" placeholder="Reserve margin W">
+      <input name="warning_threshold" type="number" min="0" step="0.01" placeholder="Warning threshold W">
+    `;
+  }
+
+  _electricalSummary(record) {
+    const bits = [];
+    if (record.maximum_current != null) bits.push(`${formatNumber(record.maximum_current, 1)} A`);
+    if (record.maximum_power != null) bits.push(`${formatNumber(record.maximum_power, 0)} W max`);
+    if (record.warning_threshold != null) bits.push(`${formatNumber(record.warning_threshold, 0)} W warning`);
+    return bits.join(" · ");
+  }
+
+  _hierarchyRow(recordType, recordId, title, details) {
+    return `
+      <div class="record-row">
+        <span>
+          <strong>${htmlEscape(title || recordId)}</strong>
+          <small>${details.filter(Boolean).map(htmlEscape).join(" · ")}</small>
+        </span>
+        <button
+          class="secondary"
+          data-archive-hierarchy
+          data-record-type="${htmlEscape(recordType)}"
+          data-record-id="${htmlEscape(recordId)}"
+        >Archive</button>
+      </div>
+    `;
+  }
+
   _settingsView() {
     const changed = this._renamePreview.filter((item) => item.changed).length;
     return `
@@ -1501,6 +1757,7 @@ class PowReportingPanel extends HTMLElement {
       .series-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5d6972; }
       .record-tools { margin-bottom: 14px; }
       .record-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+      .hierarchy-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
       .record-panel { display: grid; gap: 12px; background: #fff; border: 1px solid #dde3e7; border-radius: 8px; padding: 16px; }
       .record-form { display: grid; gap: 8px; }
       .record-form select, .record-form input { min-width: 0; width: 100%; box-sizing: border-box; }
@@ -1578,7 +1835,7 @@ class PowReportingPanel extends HTMLElement {
         .portal-hero { grid-template-columns: 1fr; }
         nav { overflow-x: auto; }
         .summary-grid, .billing-summary, .management-kpis, .statement-grid, .management-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .record-grid { grid-template-columns: 1fr; }
+        .record-grid, .hierarchy-grid { grid-template-columns: 1fr; }
         .master-control, .audit-row, .rename-row, .billing-row, .aggregate-row { grid-template-columns: 1fr; }
         .outlet-actions { display: grid; }
         select, input { min-width: 0; width: 100%; box-sizing: border-box; }

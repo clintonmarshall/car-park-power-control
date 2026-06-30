@@ -8,7 +8,12 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
+from .const import CONF_ENTITY_FILTER, DEFAULT_ENTITY_FILTER, DOMAIN
+from .hierarchy_manager import HIERARCHY_COLLECTIONS, HierarchyManager
+from .outlet_registry import discover_outlets
 from .records_manager import RecordsManager
 from .session_manager import SessionManager
 from .storage import PowReportingStore
@@ -21,6 +26,9 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _websocket_get_records)
     websocket_api.async_register_command(hass, _websocket_save_record)
     websocket_api.async_register_command(hass, _websocket_archive_record)
+    websocket_api.async_register_command(hass, _websocket_get_hierarchy)
+    websocket_api.async_register_command(hass, _websocket_save_hierarchy_record)
+    websocket_api.async_register_command(hass, _websocket_archive_hierarchy_record)
 
 
 async def async_load_session_manager(hass: HomeAssistant) -> SessionManager:
@@ -43,6 +51,18 @@ async def async_load_records_manager(hass: HomeAssistant) -> RecordsManager:
 
 async def async_save_records_manager(hass: HomeAssistant, manager: RecordsManager) -> None:
     """Persist the records manager."""
+    store = PowReportingStore(hass)
+    await store.async_save(manager.dump())
+
+
+async def async_load_hierarchy_manager(hass: HomeAssistant) -> HierarchyManager:
+    """Load the stored hierarchy manager."""
+    store = PowReportingStore(hass)
+    return HierarchyManager(await store.async_load())
+
+
+async def async_save_hierarchy_manager(hass: HomeAssistant, manager: HierarchyManager) -> None:
+    """Persist the hierarchy manager."""
     store = PowReportingStore(hass)
     await store.async_save(manager.dump())
 
@@ -149,6 +169,98 @@ async def _websocket_save_record(
     record = manager.upsert(msg["record_type"], msg["fields"])
     await async_save_records_manager(hass, manager)
     connection.send_result(msg["id"], {"record": record})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "pow_reporting/get_hierarchy",
+        vol.Optional("include_archived", default=False): cv.boolean,
+        vol.Optional("query", default=""): cv.string,
+    }
+)
+@websocket_api.async_response
+async def _websocket_get_hierarchy(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return local hierarchy records and discovered HA outlet defaults."""
+    manager = await async_load_hierarchy_manager(hass)
+    records = manager.list_records(
+        include_archived=msg["include_archived"],
+        query=msg["query"],
+    )
+    records["discovered_outlets"] = _discovered_outlets(hass)
+    connection.send_result(msg["id"], records)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "pow_reporting/save_hierarchy_record",
+        vol.Required("record_type"): vol.In(list(HIERARCHY_COLLECTIONS)),
+        vol.Required("fields"): dict,
+    }
+)
+@websocket_api.async_response
+async def _websocket_save_hierarchy_record(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Create or update a local hierarchy record."""
+    manager = await async_load_hierarchy_manager(hass)
+    record = manager.upsert(msg["record_type"], msg["fields"])
+    await async_save_hierarchy_manager(hass, manager)
+    connection.send_result(msg["id"], {"record": record})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "pow_reporting/archive_hierarchy_record",
+        vol.Required("record_type"): vol.In(list(HIERARCHY_COLLECTIONS)),
+        vol.Required("record_id"): cv.string,
+    }
+)
+@websocket_api.async_response
+async def _websocket_archive_hierarchy_record(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Archive a local hierarchy record."""
+    manager = await async_load_hierarchy_manager(hass)
+    record = manager.archive(msg["record_type"], msg["record_id"])
+    if record is None:
+        connection.send_error(msg["id"], "hierarchy_record_not_found", "No matching hierarchy record was found")
+        return
+    await async_save_hierarchy_manager(hass, manager)
+    connection.send_result(msg["id"], {"record": record})
+
+
+def _discovered_outlets(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """Return HA-discovered outlet mappings with registry metadata defaults."""
+    entry = next(iter(hass.config_entries.async_entries(DOMAIN)), None)
+    entity_filter = entry.options.get(CONF_ENTITY_FILTER) if entry else DEFAULT_ENTITY_FILTER
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    rows = []
+    for mapping in discover_outlets(hass, entity_filter=entity_filter or DEFAULT_ENTITY_FILTER).values():
+        switch_entry = entity_registry.async_get(mapping.switch_entity_id)
+        device = device_registry.async_get(mapping.device_id) if mapping.device_id else None
+        area_id = getattr(switch_entry, "area_id", None) or getattr(device, "area_id", "")
+        rows.append(
+            {
+                "switch_entity_id": mapping.switch_entity_id,
+                "switch_name": mapping.switch_name,
+                "power_entity_id": mapping.power_entity_id,
+                "energy_entity_id": mapping.energy_entity_id,
+                "device_id": mapping.device_id,
+                "ha_area_id": area_id or "",
+                "ha_floor_id": getattr(switch_entry, "floor_id", "") or "",
+                "ha_label_ids": sorted(getattr(switch_entry, "labels", []) or []),
+            }
+        )
+    return rows
 
 
 @websocket_api.websocket_command(
